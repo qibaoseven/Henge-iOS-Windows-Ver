@@ -212,10 +212,15 @@ int main(void) {
         CHECK(seen, "memory reg property found");
     }
 
-    /* The ITS is not in the tree until it exists: a node naming one would have
-       the firmware map 0x08080000 and wait for interrupts that never come. */
-    CHECK(!has_node(&t, "/intc@8000000/its@8080000"), "no ITS node");
-    CHECK(!lookup(&t, "/intc@8000000", "msi-controller", "x", 1), "the GIC does not claim MSI");
+    /* The ITS is in the tree, and the PCIe host sends its MSIs to it: a driver
+       asks the host for MSI and gets the ITS's DeviceID, which is what MAPD and
+       the translater write carry. */
+    CHECK(has_node(&t, "/intc@8000000/its@8080000"), "ITS node");
+    CHECK(lookup(&t, "/intc@8000000/its@8080000", "msi-controller", "\0", 1) == 1, "ITS is an MSI controller");
+    CHECK(lookup(&t, "/intc@8000000/its@8080000", "phandle", (uint8_t[]){0, 0, 0, 2}, 4) == 1, "ITS phandle 2");
+    CHECK(lookup(&t, "/pcie@3f000000", "msi-parent", (uint8_t[]){0, 0, 0, 2}, 4) == 1, "PCIe MSIs go to the ITS");
+    CHECK(lookup(&t, "/pcie@3f000000", "msi-map", (uint8_t[]){0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0}, 16) == 1,
+          "msi-map maps every RID straight through");
 
     /* Two cells per address word, as #address-cells = 2 says. */
     CHECK(lookup(&t, "/", "#address-cells", (uint8_t[]){0, 0, 0, 2}, 4) == 1, "#address-cells = 2");

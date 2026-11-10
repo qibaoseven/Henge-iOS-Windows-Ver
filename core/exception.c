@@ -58,6 +58,17 @@ void hv_take_exception(HvCpu *cpu, int type, uint32_t esr, uint64_t far, int set
     uint64_t offset = cpu->el == 0 ? 0x400 : cpu->spsel ? 0x200 : 0x000;
     cpu->spsr_el1 = spsr;
     cpu->elr_el1 = ret;
+    /* HV_TRACE_EXC: every exception the guest takes, with the state that says
+       why. A firmware that prints "Synchronous Exception" and then hangs has
+       taken exactly one of these, and this is where it happened. */
+    {
+        static int trace = -1;
+        if (trace < 0) trace = getenv("HV_TRACE_EXC") != NULL;
+        if (trace)
+            fprintf(stderr, "hengevm: exception type %d ec %#x pc %llx far %llx el%u sctlr %llx tcr %llx\n",
+                    type, esr >> 26, (unsigned long long)cpu->pc, (unsigned long long)far, cpu->el,
+                    (unsigned long long)cpu->sctlr_el1, (unsigned long long)cpu->tcr_el1);
+    }
     if (type == HV_EXC_SYNC || type == HV_EXC_SERROR) cpu->esr_el1 = esr;
     if (set_far) cpu->far_el1 = far;
     hv_sp_switch(cpu, 1, 1);

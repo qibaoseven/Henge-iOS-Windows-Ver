@@ -44,7 +44,9 @@ static inline uint64_t hv_exec_key(uint64_t page_va, int64_t addend) {
 #define HV_TLB_BITS 14
 #define HV_TLB_SIZE (1u << HV_TLB_BITS)
 #define HV_IJC_TABLES 16
-#define HV_RET_BITS 13 /* entries in a return table */
+#ifndef HV_RET_BITS
+#define HV_RET_BITS 13 /* entries in a return table: x30 & 0x1fff picks the entry */
+#endif
 #define HV_RET_TAB_BYTES ((1u << HV_RET_BITS) * 16)
 #define HV_CPU_RET_TAB 0x201000 /* just past the TLB */
 
@@ -112,7 +114,14 @@ typedef struct HvCpu {
     /* Each flags value's return table: {tag, host address} of the code after a call, by the
        return address's low bits (see put_call). At a multiple of 4 KB from the HvCpu, as the
        translated code adds it with one ADD. */
-    char ret_pad[HV_CPU_RET_TAB - 0x580 - (HV_TLB_SIZE * 4 * 32)];
+    /* HV_RET_CHECK: the last call site and the x30 it stashed, so a return can
+       be matched against the call that made it. Debugging only (see translate.c);
+       it lives in the padding that already exists, so no offset above moves. */
+    uint64_t ret_check_pc[64];
+    uint64_t ret_check_x30[64];
+    uint32_t ret_check_depth;
+    uint64_t ret_check_bad;
+    char ret_pad[HV_CPU_RET_TAB - 0x580 - (HV_TLB_SIZE * 4 * 32) - 64 * 16 - 8 - 8];
     uint8_t ret_tab[HV_IJC_TABLES][HV_RET_TAB_BYTES];
 
     /* The rest is only touched by C. */

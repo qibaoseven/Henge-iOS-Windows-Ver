@@ -159,8 +159,20 @@ int main(void) {
     /* the UART is where QEMU puts it */
     HvMmio *u = hv_mmio_lookup(m3, VIRT_UART0);
     CHECK(u && strcmp(u->name, "pl011") == 0, "pl011 at 0x09000000");
-    /* the ITS window is unmapped on purpose, and stays so until it is built */
-    CHECK(hv_mmio_lookup(m3, VIRT_GIC_ITS) == NULL, "ITS not faked");
+    /* The ITS is there, at QEMU's address, and is the GIC's MSI path. */
+    HvMmio *its = hv_mmio_lookup(m3, VIRT_GIC_ITS);
+    CHECK(its && strcmp(its->name, "gicv3-its") == 0, "ITS at 0x08080000");
+    CHECK(its && its->size == VIRT_GIC_ITS_SIZE, "ITS window size");
+    /* Its TYPER tells the guest its table entry size and LPI count: read through
+       the window, as a driver would. */
+    {
+        uint64_t typer = its->read(its->opaque, 0x8, 8);
+        CHECK((typer & 1) == 1, "physical LPIs");
+        CHECK(((typer >> 8) & 0xff) == 7, "8-byte ITT entries");
+        CHECK(((typer >> 24) & 0x3ff) == HV_ITS_LPI_COUNT - 1, "LPI count in TYPER");
+        uint64_t ctlr = its->read(its->opaque, 0x0, 4);
+        CHECK(ctlr == 0, "an ITS starts disabled");
+    }
     hv_virt_destroy(&v);
     hv_machine_free(m3);
     free(m3);

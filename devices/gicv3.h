@@ -6,10 +6,17 @@
 
 #include "machine.h"
 
-/* GICv3 with one security state (DS=1), no LPIs or ITS: the distributor, one
-   redistributor per CPU, and each CPU's ICC_* system registers. INTIDs 0-15
-   are SGIs, 16-31 PPIs (both banked per CPU), 32 and up SPIs. */
-#define HV_GIC_NUM_IRQS (256 + 32) /* vmapple: 256 SPIs */
+/* GICv3 with one security state (DS=1): the distributor, one redistributor per
+   CPU, and each CPU's ICC_* system registers. INTIDs 0-15 are SGIs, 16-31 PPIs
+   (both banked per CPU), 32 and up SPIs.
+
+   LPIs (from the ITS) are carried in the same tables as SPIs, above the last
+   SPI: they are level-like, route to one CPU, and are pended by writing a bit,
+   which is exactly what an SPI is here. HV_GIC_NUM_IRQS therefore covers
+   HV_GIC_LPI_BASE + HV_GIC_LPI_COUNT. */
+#define HV_GIC_LPI_BASE 8192
+#define HV_GIC_LPI_COUNT 256
+#define HV_GIC_NUM_IRQS (HV_GIC_LPI_BASE + HV_GIC_LPI_COUNT)
 
 typedef struct HvGicActive {
     uint16_t intid;
@@ -51,6 +58,8 @@ void hv_gicv3_set_irq(HvGic *g, int intid, int level);
 void hv_gicv3_set_ppi(HvGic *g, int cpu, int intid, int level);
 /* Make an SPI pending, as an MSI write does. */
 void hv_gicv3_pend(HvGic *g, int intid);
+/* Pend an INTID on one CPU, whatever kind it is: the ITS delivers LPIs this way. */
+void hv_gicv3_pend_cpu(HvGic *g, int intid, int cpu);
 /* Recompute every CPU's IRQ and FIQ inputs (waking any that just got one). */
 void hv_gicv3_update(HvGic *g);
 

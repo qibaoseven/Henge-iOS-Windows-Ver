@@ -26,7 +26,15 @@ static const char *const hv_knob_names[HV_K_COUNT] = {"HV_NO_RAS", "HV_SUPERBLOC
 static void knobs_init(void) {
     for (int i = 0; i < HV_K_COUNT; i++)
         hv_knob[i] = getenv(hv_knob_names[i]) ? atoi(getenv(hv_knob_names[i])) : 0;
-    if (getenv("HV_NO_RAS") && !*getenv("HV_NO_RAS")) hv_knob[HV_K_NO_RAS] = 1;
+    /* HV_NO_RAS=1 was the way to turn the return-address stack off for a test.
+       It is off by default now (2026-11-10): the arm64 UEFI firmware in the virt
+       machine loops forever at its MMU setup with it on and boots through it
+       with it off -- the guest returns to an address other than the one it
+       called from, and the tag that is meant to catch that does not. Until that
+       is understood, every return goes through the indirect-branch cache.
+       HV_RAS=1 turns the fast path back on to compare. */
+    hv_knob[HV_K_NO_RAS] = 1;
+    if (getenv("HV_RAS") && *getenv("HV_RAS") && strcmp(getenv("HV_RAS"), "0")) hv_knob[HV_K_NO_RAS] = 0;
     /* HV_SWITCH_FLUSH (skipping the local TLBI VMALLE1 xnu issues right after a process switch) is off unless asked
        since 2026-11-09: a checked skip on the phone found a kept user entry out of date (a stack page, no mapping),
        the stale state that flush exists to retire (xnu reusing a hardware ASID, which can leave every process's kept

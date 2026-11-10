@@ -25,14 +25,15 @@
 #define AT_STRINGS 0x10000u /* the structure block has 60 KB; this tree needs 2 */
 #define AT_END (AT_STRINGS + 0x2000u)
 
-#define MAX_NAMES 64
+#define MAX_NAMES 64       /* distinct property names */
+#define MAX_PROPS 512      /* properties: one patch each, and a CPU adds five */
 
 typedef struct {
     uint8_t *buf;
     uint64_t pos;
     const char *name[MAX_NAMES];
-    uint32_t nameoff_at[256]; /* where in the structure block each nameoff field is */
-    uint8_t pid[256];         /* which name that field must hold */
+    uint32_t nameoff_at[MAX_PROPS]; /* where in the structure block each nameoff field is */
+    uint16_t pid[MAX_PROPS];        /* which name that field must hold */
     int npatches;
     int nnames;
     int overflow;
@@ -91,8 +92,8 @@ static void prop(Fdt *f, const char *name, const void *val, uint32_t len) {
         return;
     }
     put32(f->buf + f->pos, len);
-    if (f->npatches < MAX_NAMES) {
-        f->pid[f->npatches] = (uint8_t)id; /* which name this property uses */
+    if (f->npatches < MAX_PROPS) {
+        f->pid[f->npatches] = (uint16_t)id; /* which name this property uses */
         f->nameoff_at[f->npatches] = (uint32_t)f->pos + 4;
         f->npatches++;
     } else {
@@ -201,9 +202,7 @@ static void build(Fdt *f, uint64_t ram_base, uint64_t ram_size, uint32_t ncpus) 
     }
     end_node(f);
 
-    /* The GIC: distributor then redistributor. No ITS node, because there is no
-       ITS: naming one would send the firmware looking for a device that is not
-       there. It joins the tree with the ITS itself. */
+    /* The GIC: distributor then redistributor. */
     snprintf(node, sizeof node, "intc@%llx", (unsigned long long)VIRT_GIC_DIST);
     begin(f, node);
     prop_str(f, "compatible", "arm,gic-v3");
@@ -218,6 +217,21 @@ static void build(Fdt *f, uint64_t ram_base, uint64_t ram_size, uint32_t ncpus) 
                          0, (uint32_t)VIRT_GIC_REDIST, 0, (uint32_t)VIRT_GIC_REDIST_SIZE};
         prop_cells(f, "reg", c, 8);
     }
+    /* The ITS hangs off the GIC, and MSIs reach it through this phandle: a
+       device whose driver asks the PCIe host for MSI gets (its RID) as the
+       ITS's DeviceID, which is what MAPD and the translater write carry. */
+    begin(f, "its@8080000");
+    prop_str(f, "compatible", "arm,gic-v3-its");
+    prop_str(f, "msi-controller", "");
+    prop_u32(f, "#msi-cells", 1);
+    prop_u32(f, "#address-cells", 0);
+    prop_u32(f, "#size-cells", 0);
+    prop_u32(f, "phandle", 2);
+    {
+        uint32_t c[4] = {0, (uint32_t)VIRT_GIC_ITS, 0, (uint32_t)VIRT_GIC_ITS_SIZE};
+        prop_cells(f, "reg", c, 4);
+    }
+    end_node(f);
     end_node(f);
 
     snprintf(node, sizeof node, "pl011@%llx", (unsigned long long)VIRT_UART0);
@@ -258,6 +272,13 @@ static void build(Fdt *f, uint64_t ram_base, uint64_t ram_size, uint32_t ncpus) 
     prop_cells(f, "bus-range", (uint32_t[]){0, 255}, 2);
     prop_u32(f, "#address-cells", 3);
     prop_u32(f, "#size-cells", 2);
+    prop_u32(f, "msi-parent", 2); /* the ITS */
+    {
+        /* msi-map: RID 0..0xffff map straight to the ITS's DeviceID, the ITS's
+           phandle, no offset. */
+        uint32_t m[4] = {0, 0x10000, 2, 0};
+        prop_cells(f, "msi-map", m, 4);
+    }
     {
         uint32_t c[4] = {(uint32_t)(VIRT_PCIE_ECAM >> 32), (uint32_t)VIRT_PCIE_ECAM,
                          (uint32_t)(VIRT_PCIE_ECAM_SIZE >> 32), (uint32_t)VIRT_PCIE_ECAM_SIZE};
@@ -284,6 +305,7 @@ static void build(Fdt *f, uint64_t ram_base, uint64_t ram_size, uint32_t ncpus) 
 }
 
 uint64_t hv_dtb_build(uint8_t *buf, uint64_t cap, uint64_t ram_base, uint64_t ram_size, uint32_t ncpus) {
+    /* AT_END is what this tree needs; cap is what the caller has. */
     if (!buf || cap < AT_END) return 0;
     memset(buf, 0, (size_t)AT_END); /* the reservation map and all padding */
     Fdt f = {.buf = buf, .pos = AT_STRUCT};

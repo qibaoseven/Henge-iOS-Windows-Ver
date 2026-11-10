@@ -15,6 +15,10 @@
 
 /* ID registers: only features the translator handles. Host features are a
    superset (Apple M1 and later), so copied instructions always exist. */
+/* HV_PFR0_EL3=1 (experiment): report EL3 present in the EL3 field (bits 15:12).
+   ArmVirtQemu's earliest stage reads this to decide whether PSCI goes over SMC
+   or HVC, before it has parsed the device tree; with no EL3 it takes a path
+   that waits for an interrupt nothing sends. */
 #define ID_AA64PFR0  0x1100000001110011ull /* EL0/EL1 AArch64, FP+AdvSIMD with FP16, GICv3 sysregs, CSV2, CSV3 */
 #define ID_AA64ISAR0 0x0011100110212120ull /* AES+PMULL, SHA1, SHA2/512, CRC32, LSE, RDM, SHA3, DotProd, FHM, FlagM */
 #define ID_AA64ISAR1 0x0000001110211011ull /* DPB, PAuth (no-op), JSCVT, FCMA, LRCPC2, PACGA, FRINTTS, SB */
@@ -116,7 +120,14 @@ static int read_reg(HvCpu *cpu, uint32_t reg, uint64_t *v) {
     case R(3, 0, 0, 0, 0): *v = MIDR; return 0;
     case R(3, 0, 0, 0, 5): *v = cpu->mpidr; return 0;
     case R(3, 0, 0, 0, 6): *v = 0; return 0;                             /* REVIDR */
-    case R(3, 0, 0, 4, 0): *v = ID_AA64PFR0; return 0;
+    case R(3, 0, 0, 4, 0):
+        *v = ID_AA64PFR0;
+        {
+            static int el3 = -1;
+            if (el3 < 0) el3 = getenv("HV_PFR0_EL3") != NULL;
+            if (el3) *v |= (uint64_t)2 << 12; /* EL3: AArch64 */
+        }
+        return 0;
     case R(3, 0, 0, 5, 0): *v = ID_AA64DFR0; return 0;
     case R(3, 0, 0, 6, 0): *v = ID_AA64ISAR0; return 0;
     case R(3, 0, 0, 6, 1): *v = ID_AA64ISAR1; return 0;
@@ -186,6 +197,15 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
     case R(3, 0, 4, 0, 0): cpu->spsr_el1 = v; return 0;
     case R(3, 0, 4, 0, 1): cpu->elr_el1 = v; return 0;
     case R(3, 0, 1, 0, 0): { /* SCTLR: xnu flips the PAC enables (EnIA/IB/DA/DB) on every process switch */
+        {
+            static int tr = -1;
+            if (tr < 0) tr = getenv("HV_MMU_LOG") != NULL;
+            if (tr && ((cpu->sctlr_el1 ^ v) & 1))
+                fprintf(stderr, "hengevm: SCTLR_EL1 %llx -> %llx at pc %llx  TCR %llx TTBR0 %llx MAIR %llx\n",
+                        (unsigned long long)cpu->sctlr_el1, (unsigned long long)v, (unsigned long long)cpu->pc,
+                        (unsigned long long)cpu->tcr_el1, (unsigned long long)cpu->ttbr0_el1,
+                        (unsigned long long)cpu->mair_el1);
+        }
         uint64_t changed = cpu->sctlr_el1 ^ v;
         cpu->sctlr_el1 = v;
         if (changed & (1u | 1u << 19 | 1u << 24 | 1u << 25)) { /* M, WXN, E0E, EE: what translations depend on */

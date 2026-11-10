@@ -940,7 +940,43 @@ static int run_loop(HvCpu *cpu, int one) {
     uint32_t last_reason = HV_EXIT_BRANCH;
     hv_self = cpu;
     unpark(cpu);
+    /* HV_PCHOT=N: a guest that stays inside one page for N iterations of this
+       loop is not making progress; report where and stop. A boot that hangs has
+       to be diagnosed from the guest's own state, and the PC says which stage.
+       Off unless asked for. */
+    uint64_t pchot_lim = 0, pchot_page = ~0ull, pchot_n = 0;
+    {
+        const char *e = getenv("HV_PCHOT");
+        if (e) pchot_lim = (uint64_t)strtoull(e, NULL, 0);
+    }
     for (;;) {
+        if (pchot_lim && !cpu->off && !cpu->halted) {
+            /* HV_PCLOG=M: print the PC every M iterations, to see where a hung
+               guest spends its time without stopping it. */
+            static uint64_t sample_at = 0;
+            if (pchot_n % 2000 == 0 && cpu->index == 0) {
+                fprintf(stderr, "[pc] %llx el%u sctlr=%llx ttbr0=%llx exit=%u\n", (unsigned long long)cpu->pc, cpu->el,
+                        (unsigned long long)cpu->sctlr_el1, (unsigned long long)cpu->ttbr0_el1, cpu->exit_reason);
+            }
+            (void)sample_at;
+            uint64_t pg = cpu->pc & ~0xfffull;
+            if (pg != pchot_page) {
+                pchot_page = pg;
+                pchot_n = 0;
+            } else if (++pchot_n > pchot_lim) {
+                fprintf(stderr, "\nhengevm: cpu %u spun in page %llx (%llu times) at pc %llx el%u\n"
+                                "  x0 %llx  x1 %llx  x2 %llx  x3 %llx\n"
+                                "  x4 %llx  x5 %llx  x6 %llx  x7 %llx\n"
+                                "  sp %llx  x29 %llx  x30 %llx  elr %llx spsr %llx sctlr %llx tcr %llx\n",
+                        cpu->index, (unsigned long long)pg, (unsigned long long)pchot_n, (unsigned long long)cpu->pc,
+                        cpu->el, (unsigned long long)cpu->x[0], (unsigned long long)cpu->x[1], (unsigned long long)cpu->x[2],
+                        (unsigned long long)cpu->x[3], (unsigned long long)cpu->x[4], (unsigned long long)cpu->x[5],
+                        (unsigned long long)cpu->x[6], (unsigned long long)cpu->x[7], (unsigned long long)cpu->x[29 - 29],
+                        (unsigned long long)cpu->x[29], (unsigned long long)cpu->x[30], (unsigned long long)cpu->elr_el1,
+                        (unsigned long long)cpu->spsr_el1, (unsigned long long)cpu->sctlr_el1, (unsigned long long)cpu->tcr_el1);
+                return HV_EXIT_FAULT_LOOP;
+            }
+        }
         if (__atomic_load_n(&m->flush_pending, __ATOMIC_SEQ_CST) || __atomic_load_n(&m->stw_active, __ATOMIC_SEQ_CST)) {
             stop_the_world(cpu);
             pending_chain = NULL;

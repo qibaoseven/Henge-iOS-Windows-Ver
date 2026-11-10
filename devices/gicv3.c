@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Register layout follows the GICv3 architecture specification (IHI 0069);
@@ -133,6 +134,12 @@ static void end_of_interrupt(HvGic *g, int c, int intid) {
 }
 
 static uint64_t icc_read_body(HvMachine *m, HvCpu *cpu, uint32_t reg) {
+    {
+        static int tr = -1;
+        if (tr < 0) tr = getenv("HV_ICC_LOG") != NULL;
+        if (tr) fprintf(stderr, "icc read reg %#x -> op0=%u op1=%u CRn=%u CRm=%u op2=%u\n", reg,
+                        (reg >> 14) & 3, (reg >> 11) & 7, (reg >> 7) & 15, (reg >> 3) & 15, reg & 7);
+    }
     HvGic *g = m->gic;
     int c = (int)cpu->index;
     HvGicCpu *k = &g->cpu[c];
@@ -155,6 +162,14 @@ static uint64_t icc_read_body(HvMachine *m, HvCpu *cpu, uint32_t reg) {
     case R(3, 0, 12, 12, 6): return k->igrpen0;
     case R(3, 0, 12, 12, 7): return k->igrpen1;
     case R(3, 0, 12, 8, 4): return (uint32_t)k->ap0r;
+    /* ICC_AP0R0..3 and ICC_AP1R0..3 (the active priority registers a driver
+       saves and restores). AP0R0 is what a boot loader polls to learn whether
+       an interrupt it raised is still active; answering 0 says none is. */
+    case R(3, 0, 4, 2, 2): return (uint32_t)k->ap0r;   /* ICC_AP0R0_EL1 */
+    case R(3, 0, 4, 2, 3): return (uint32_t)(k->ap0r >> 32); /* ICC_AP0R1_EL1 */
+    case R(3, 0, 4, 2, 0): return (uint32_t)k->ap1r;   /* ICC_AP1R0_EL1 */
+    case R(3, 0, 4, 2, 1): return (uint32_t)(k->ap1r >> 32); /* ICC_AP1R1_EL1 */
+    case R(3, 0, 4, 3, 0): return (uint32_t)(k->ap1r >> 32); /* ICC_AP1R2_EL1 */
     case R(3, 0, 12, 9, 0): return (uint32_t)k->ap1r;
     default: return 0;                                                 /* AP*R1-3 and the rest */
     }
@@ -176,6 +191,11 @@ static void icc_write_body(HvMachine *m, HvCpu *cpu, uint32_t reg, uint64_t v) {
     case R(3, 0, 12, 12, 6): k->igrpen0 = v & 1; break;
     case R(3, 0, 12, 12, 7): k->igrpen1 = v & 1; break;
     case R(3, 0, 12, 8, 4): k->ap0r = (uint32_t)v; break;
+    case R(3, 0, 4, 2, 2): k->ap0r = (k->ap0r & ~0xffffffffull) | (uint32_t)v; break;
+    case R(3, 0, 4, 2, 3): k->ap0r = (k->ap0r & 0xffffffffull) | ((uint64_t)(uint32_t)v << 32); break;
+    case R(3, 0, 4, 2, 0): k->ap1r = (k->ap1r & ~0xffffffffull) | (uint32_t)v; break;
+    case R(3, 0, 4, 2, 1): k->ap1r = (k->ap1r & 0xffffffffull) | ((uint64_t)(uint32_t)v << 32); break;
+    case R(3, 0, 4, 3, 0): k->ap1r = (k->ap1r & 0xffffffffull) | ((uint64_t)(uint32_t)v << 32); break;
     case R(3, 0, 12, 9, 0): k->ap1r = (uint32_t)v; break;
     case R(3, 0, 12, 11, 5): case R(3, 0, 12, 11, 6): case R(3, 0, 12, 11, 7): { /* SGI1R, ASGI1R, SGI0R */
         int intid = (v >> 24) & 0xf;
@@ -406,6 +426,24 @@ void hv_gicv3_set_ppi(HvGic *g, int c, int intid, int level) {
 void hv_gicv3_pend(HvGic *g, int intid) {
     pthread_mutex_lock(&g->mu);
     hv_gicv3_pend_body(g, intid);
+    pthread_mutex_unlock(&g->mu);
+}
+
+/* An LPI: enabled and routed to `cpu` here rather than by the guest's GICD
+   writes, because an LPI's configuration lives in the ITS's own tables and the
+   distributor has no words for it. level is set so it behaves like a line the
+   device asserts and the driver's EOI retires. */
+void hv_gicv3_pend_cpu(HvGic *g, int intid, int cpu) {
+    if (intid < HV_GIC_LPI_BASE || intid >= HV_GIC_NUM_IRQS) return;
+    pthread_mutex_lock(&g->mu);
+    g->enabled[intid] = 1;
+    g->priority[intid] = 0x00; /* LPIs with the highest priority the group allows */
+    g->group[intid] = 1;       /* Group 1: what an OS driver masks with DAIF.I */
+    g->level[intid] = 1;
+    g->latch[intid] = 1;
+    g->route[intid] = (uint64_t)(cpu & 0xff);
+    g->spi_on[intid / 64] |= 1ull << (intid % 64);
+    hv_gicv3_update(g);
     pthread_mutex_unlock(&g->mu);
 }
 

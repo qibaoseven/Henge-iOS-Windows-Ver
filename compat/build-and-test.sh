@@ -28,7 +28,7 @@ for f in classify operands translate dispatch memop exception sysreg machine; do
 done
 # The virt machine's pieces, which the Windows direction needs and which build
 # without a JIT: their test drives the device callbacks through the MMIO map.
-for f in pflash fw_cfg virt dtb gicv3 pl011 pl031 pl061 pcie timer; do
+for f in pflash fw_cfg virt dtb its gicv3 pl011 pl031 pl061 pcie timer; do
     $CC $CFLAGS -Idevices -c "devices/$f.c" -o "$OUT/dev_$f.o"
 done
 # mmu.c must not use SIMD: hv_tlb_refill runs with the guest's vectors live.

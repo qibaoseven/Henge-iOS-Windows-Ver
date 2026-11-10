@@ -5,6 +5,7 @@
 
 #include "fw_cfg.h"
 #include "gicv3.h"
+#include "its.h"
 #include "machine.h"
 #include "pflash.h"
 #include "pl011.h"
@@ -59,6 +60,7 @@ typedef struct HvVirt {
     HvPl061 *gpio;
     HvPflash *flash;
     HvFwCfg *fw;
+    HvIts *its;
     uint64_t dtb_len; /* 0: no tree was written */
 } HvVirt;
 

@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 
 #include "dtb.h"
+#include "its.h"
 #include "pcie.h"
 #include "timer.h"
 
@@ -30,6 +31,14 @@
       all) and not enough for Windows' virtio drivers, which is the next thing
       to build. The window is left unmapped rather than faked: a firmware or
       guest that probes for the ITS finds nothing, which is true. */
+
+/* A redistributor's base address to its CPU: the machine places them one after
+   another, 2 x 64 KB each, from VIRT_GIC_REDIST. */
+static int virt_rd_cpu(uint32_t rd_base) {
+    if (rd_base < VIRT_GIC_REDIST) return 0;
+    uint32_t idx = (rd_base - (uint32_t)VIRT_GIC_REDIST) >> 17;
+    return idx < HV_MAX_CPUS ? (int)idx : 0;
+}
 
 int hv_virt_create(HvVirt *b, HvMachine *m, HvCpu *cpus, int ncpus, uint64_t ram_size,
                    const char *code_path, const char *vars_path) {
@@ -72,6 +81,11 @@ int hv_virt_create(HvVirt *b, HvMachine *m, HvCpu *cpus, int ncpus, uint64_t ram
     b->fw = hv_fw_cfg_create(m, VIRT_FW_CFG);
     if (!b->fw) goto fail;
 
+    /* The ITS: without it a PCIe device has no MSI at all, and Windows'
+       virtio drivers will not take an interrupt line instead. */
+    b->its = hv_its_create(m, b->gic, VIRT_GIC_ITS, VIRT_GIC_ITS_SIZE, virt_rd_cpu);
+    if (!b->its) goto fail;
+
     /* The second step, wired now because it costs one line and proves the map:
        an empty PCIe host bridge on QEMU's ECAM and MMIO windows. Its devices
        (virtio-blk, -net, -gpu) come with the ITS. */
@@ -88,6 +102,10 @@ fail:
 
 static uint64_t tick(HvMachine *m, HvCpu *cpu) {
     HvVirt *b = m->tick_opaque;
+    /* The guest queues ITS commands and rings a doorbell by writing GITS_CWRITER,
+       which runs them there and then; this catches a queue left with work in it
+       (the guest may also just write into the ring). */
+    if (cpu->index == 0) hv_its_poll(b->its);
     return hv_timer_update(b->gic, cpu);
 }
 
@@ -113,6 +131,11 @@ int hv_virt_save_vars(HvVirt *b, const char *path) {
 
 void hv_virt_destroy(HvVirt *b) {
     if (!b) return;
+    if (b->its) {
+        pthread_mutex_destroy(&b->its->mu);
+        free(b->its->dev);
+        free(b->its);
+    }
     free(b->gic);
     free(b->uart);
     free(b->rtc);
