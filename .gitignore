@@ -1,1 +1,5 @@
+firmware/*.fd
+firmware/*.deb
+firmware/*.tar.xz
+firmware/x/
 build/

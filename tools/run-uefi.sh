@@ -30,6 +30,7 @@ EOF
     fi
 done
 
+CC=${CC:-cc}
 BIN=build/posix/hv_uefi
 mkdir -p build/posix
 CFLAGS="-std=c11 -O1 -w -D_GNU_SOURCE -Icompat -Icore -Ihost -Idevices -include compat/henge_pthread.h -include compat/henge_ulock.h"
@@ -57,7 +58,7 @@ if [ ! -f build/posix/vb_enter.o ]; then
     objcopy $DEFS build/posix/vb_enter.raw.o build/posix/vb_enter.o
     rm -f build/posix/vb_enter.raw.o
 fi
-$CC $CFLAGS host/main_uefi.c $OBJS build/posix/vb_mmu.o build/posix/vb_enter.o -latomic -lpthread -o "$BIN"
+$CC $CFLAGS $OBJS build/posix/vb_mmu.o build/posix/vb_enter.o -latomic -lpthread -o "$BIN"
 ( $needs_build ) >/dev/null 2>&1 || true
 
 exec "$BIN" --code "$CODE" --vars "$VARS" --ram "$RAM"
