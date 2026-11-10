@@ -45,6 +45,17 @@ typedef struct HvVirtio {
     void (*notify)(struct HvVirtio *v, int q);
     void (*config_write)(struct HvVirtio *v, uint32_t off, uint64_t val, unsigned size);
     void *dev;
+    /* MSI-X: the guest writes a message per vector into a table in BAR space;
+       an interrupt is a write of that message to the ITS's translater. Vector 0
+       is the config change, vector 1 + q is queue q, as virtio spec'd it. */
+    struct HvMsixEntry {
+        uint64_t addr;
+        uint32_t data;
+        uint32_t ctrl; /* bit 0: masked */
+    } msix[HV_VIRTQ_MAX + 2];
+    int nmsix;
+    int msix_vector;        /* the vector config changes were told to use; -1 none */
+    uint64_t msix_bar_base; /* where the table sits in guest memory once the BAR is assigned */
 } HvVirtio;
 
 /* device_id is the virtio device type (1 net, 2 block); PCI IDs default to the
@@ -55,6 +66,8 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
 int hv_virtq_pop(HvVirtio *v, int q, HvVirtqElem *e);
 void hv_virtq_push(HvVirtio *v, int q, const HvVirtqElem *e, uint32_t written);
 void hv_virtio_interrupt(HvVirtio *v);
+/* One queue's interrupt (queue q uses MSI-X vector q + 1). */
+void hv_virtio_queue_interrupt(HvVirtio *v, int q);
 /* The device's config changed (a new value the driver should read): ISR bit 1 and a new generation. */
 void hv_virtio_config_changed(HvVirtio *v);
 

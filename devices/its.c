@@ -94,7 +94,7 @@ static void do_cmd(HvIts *its, uint64_t w0, uint64_t w1, uint64_t w2) {
     uint32_t op = (uint32_t)(w0 >> 24) & 0xff;
     switch (op) {
     case OP_MAPD: { /* [63:32] DeviceID, [10:8] CollectionID */
-        struct HvItsDev *d = find_dev(its, (uint32_t)w0, 1);
+        struct HvItsDev *d = find_dev(its, (uint32_t)(w0 >> 32), 1);
         if (d) d->collection = (int)((w0 >> 8) & 0xff);
         break;
     }
@@ -108,11 +108,11 @@ static void do_cmd(HvIts *its, uint64_t w0, uint64_t w1, uint64_t w2) {
         break;
     }
     case OP_MAPTI: /* [63:32] DeviceID, [31:16] EventID, [15:0] physical LPI */
-    case OP_MAPI:  /* [63:32] DeviceID, [31:16] EventID, [15:0] physical LPI */
-        map_event(its, (uint32_t)w0, (uint32_t)((w0 >> 16) & 0xffff), (uint32_t)(w0 & 0xffff));
+    case OP_MAPI:
+        map_event(its, (uint32_t)(w0 >> 32), (uint32_t)((w0 >> 16) & 0xff), (uint32_t)(w0 & 0xffff));
         break;
     case OP_MOVI: { /* [63:32] DeviceID, [15:0] EventID: pend it on its collection */
-        struct HvItsDev *d = find_dev(its, (uint32_t)w0, 0);
+        struct HvItsDev *d = find_dev(its, (uint32_t)(w0 >> 32), 0);
         uint32_t event = (uint32_t)(w0 & 0xffff);
         if (!d) break;
         int cpu = coll_cpu(its, d->collection);
@@ -125,7 +125,7 @@ static void do_cmd(HvIts *its, uint64_t w0, uint64_t w1, uint64_t w2) {
         break;
     }
     case OP_DISCARD: {
-        struct HvItsDev *d = find_dev(its, (uint32_t)w0, 0);
+        struct HvItsDev *d = find_dev(its, (uint32_t)(w0 >> 32), 0);
         if (d) d->nev = 0;
         break;
     }
@@ -134,10 +134,13 @@ static void do_cmd(HvIts *its, uint64_t w0, uint64_t w1, uint64_t w2) {
 }
 
 static void run_commands(HvIts *its, uint32_t write) {
-    if (!(its->ctlr & 1) || !(its->cbaser & 1)) return;
-    uint64_t bytes = ((its->cbaser >> 12) & 0xff) ? (((its->cbaser >> 12) & 0xff) + 1) << 12 : 0;
+    /* GITS_CBASER: [7:0] size - 1 in 4 KB pages, [51:12] base, [63] valid.
+       (The architecture puts valid at bit 63, not bit 0: a queue written the
+       other way reads as one page at an address of zero.) */
+    if (!(its->ctlr & 1) || !(its->cbaser >> 63)) return;
+    uint64_t bytes = (uint64_t)((its->cbaser & 0xff) + 1) << 12;
     if (!bytes) return;
-    uint8_t *q = hv_phys_ptr(its->m, its->cbaser & ~0xfffull, bytes);
+    uint8_t *q = hv_phys_ptr(its->m, its->cbaser & 0x0000fffffffff000ull, bytes);
     if (!q) return;
     uint32_t mask = (uint32_t)(bytes - 1);
     uint32_t rd = its->creadr & mask;
@@ -227,7 +230,7 @@ HvIts *hv_its_create(HvMachine *m, HvGic *gic, uint64_t pa, uint64_t size, int (
     for (int c = 0; c < HV_MAX_CPUS; c++) its->coll[c] = -1;
     its->typer = 1ull              /* physical LPIs */
                  | (7ull << 8)     /* ITT entry size 8 bytes */
-                 | (15ull << 16)   /* 16-bit EventIDs */
+                 | (7ull << 16)    /* 8-bit EventIDs: [23:16], so the opcode in [31:24] does not collide */
                  | (23ull << 19)   /* 24-bit DeviceIDs */
                  | ((uint64_t)(HV_ITS_LPI_COUNT - 1) << 24); /* last LPI INTID's offset */
     if (hv_machine_add_mmio(m, pa, size, its, its_read, its_write, "gicv3-its") != 0) {

@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "its.h"
+
 /* Layout of the one BAR (BAR 4, 16 KB), as QEMU's virtio-pci lays it out. */
 #define BAR 4
 #define COMMON 0x0000
@@ -11,6 +13,8 @@
 #define DEVICE 0x2000
 #define NOTIFY 0x3000
 #define NOTIFY_MULT 4
+#define MSIX_TABLE 0x4000 /* above the notify area: 16 bytes per vector */
+#define MSIX_PBA 0x8000
 
 #define DESC_F_NEXT 1
 #define DESC_F_WRITE 2
@@ -48,7 +52,7 @@ static uint64_t common_read(HvVirtio *v, uint64_t off) {
     case 0x04: return v->dfsel < 2 ? (uint32_t)(v->features >> (32 * v->dfsel)) : 0;
     case 0x08: return v->gfsel;
     case 0x0c: return v->gfsel < 2 ? (uint32_t)(v->driver_features >> (32 * v->gfsel)) : 0;
-    case 0x10: return 0xffff;                  /* config_msix_vector: no MSI-X */
+    case 0x10: return (uint16_t)(v->msix_vector < 0 ? 0xffff : v->msix_vector); /* config_msix_vector */
     case 0x12: return v->nq;
     case 0x14: return v->status;
     case 0x15: return v->config_gen;
@@ -112,9 +116,20 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
     if (off < DEVICE) { /* ISR: reading clears it and drops the line */
         uint8_t isr = v->isr;
         v->isr = 0;
-        hv_pci_set_intx(&v->pci, 0);
         return isr;
     }
+    if (off >= MSIX_TABLE && off < MSIX_TABLE + 0x1000) { /* the MSI-X table */
+        uint32_t o = (uint32_t)(off - MSIX_TABLE);
+        int vec = (int)(o / 16);
+        uint32_t w = o % 16;
+        if (vec >= v->nmsix) return 0;
+        uint64_t r = 0;
+        if (w < 8) r = v->msix[vec].addr >> (w * 8);
+        else if (w < 12) r = v->msix[vec].data >> ((w - 8) * 8);
+        else r = v->msix[vec].ctrl >> ((w - 12) * 8);
+        return r & ((size >= 8) ? ~0ull : (1ull << (size * 8)) - 1);
+    }
+    if (off >= MSIX_PBA && off < MSIX_PBA + 0x1000) return 0; /* no pending bits: an MSI is delivered at once */
     if (off < NOTIFY) {
         uint64_t r = 0;
         uint32_t o = (uint32_t)(off - DEVICE);
@@ -132,6 +147,30 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
 static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t val, unsigned size) {
     HvVirtio *v = d->opaque;
     if (bar != BAR) return;
+    if (off >= MSIX_TABLE && off < MSIX_TABLE + 0x1000) {
+        uint32_t o = (uint32_t)(off - MSIX_TABLE);
+        int vec = (int)(o / 16);
+        uint32_t w = o % 16;
+        if (vec >= v->nmsix) return;
+        /* An entry is 0..7 address, 8..11 data, 12..15 control. The shift is
+           within the field's own width: the address is 64 bits, the other two
+           32, and shifting a 32-bit control word by 32 leaves nothing. */
+        uint64_t m = (size >= 8) ? ~0ull : ((1ull << (size * 8)) - 1);
+        if (w < 8) {
+            uint64_t sh = (uint64_t)(w & 7) * 8;
+            v->msix[vec].addr = (v->msix[vec].addr & ~(m << sh)) | ((val & m) << sh);
+        } else if (w < 12) {
+            uint64_t sh = (uint64_t)(w - 8) * 8;
+            v->msix[vec].data = (uint32_t)((v->msix[vec].data & ~(m << sh)) | ((val & m) << sh));
+        } else {
+            uint64_t sh = (uint64_t)(w - 12) * 8;
+            v->msix[vec].ctrl = (uint32_t)((v->msix[vec].ctrl & ~(m << sh)) | ((val & m) << sh));
+        }
+        if (v->m->log && w == 0)
+            fprintf(stderr, "virtio: MSI-X vector %d addr %llx data %x (ctrl %u)\n", vec,
+                    (unsigned long long)v->msix[vec].addr, v->msix[vec].data, v->msix[vec].ctrl);
+        return;
+    }
     if (off < ISR) {
         common_write(v, off, val, size);
     } else if (off >= DEVICE && off < NOTIFY) {
@@ -151,26 +190,50 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
     v->pci.opaque = v;
     v->pci.bar_read = bar_read;
     v->pci.bar_write = bar_write;
-    hv_pci_add_bar(&v->pci, BAR, 0x4000, 1);
+    hv_pci_add_bar(&v->pci, BAR, 0x10000, 1);
     v->pci.config[0x06] |= 0x10;                 /* capability list */
     v->pci.config[0x34] = 0x40;
     add_cap(v, 0x40, 0x50, 1, COMMON, 0x38);
     add_cap(v, 0x50, 0x60, 3, ISR, 1);
     add_cap(v, 0x60, 0x70, 4, DEVICE, 0x100);
     add_cap(v, 0x70, 0x00, 2, NOTIFY, NOTIFY_MULT * HV_VIRTQ_MAX);
+    /* MSI-X, with one vector for config changes and one per queue: without it
+       Windows' virtio drivers refuse the device (they ask for MSI and stop). */
+    v->nmsix = nq + 1;
+    v->msix_vector = -1;
+    hv_pci_add_msix(&v->pci, v->nmsix, BAR, MSIX_TABLE, MSIX_PBA);
     reset(v);
+}
+
+/* The table entry's message goes to the ITS as an MSI. A masked vector, or one
+   with no message, gets nothing -- a driver that asked for MSI has said it will
+   not look at the line. */
+static void msix_raise(HvVirtio *v, int vector) {
+    if (vector < 0 || vector >= v->nmsix) return;
+    struct HvMsixEntry *e = &v->msix[vector];
+    if (e->ctrl & 1) return;
+    if (!e->addr) return;
+    v->pci.msix_current_vector = vector;
+    HvPcie *bus = v->pci.bus;
+    /* The ITS names a device by its requester ID: what the device wrote into the
+       message is only the address and the EventID. */
+    if (bus && bus->its) hv_its_signal((HvIts *)bus->its, (uint32_t)v->pci.devfn, e->data);
 }
 
 void hv_virtio_interrupt(HvVirtio *v) {
     v->isr |= 1;
-    hv_pci_set_intx(&v->pci, 1);
+    msix_raise(v, v->msix_vector >= 0 ? v->msix_vector : 1);
 }
 
 void hv_virtio_config_changed(HvVirtio *v) {
     v->config_gen++;
     v->isr |= 2;
-    hv_pci_set_intx(&v->pci, 1);
+    msix_raise(v, 0);
 }
+
+/* A queue's own interrupt: virtio's per-queue MSI-X, which is what a driver
+   with several queues expects (queue q -> vector q + 1). */
+void hv_virtio_queue_interrupt(HvVirtio *v, int q) { msix_raise(v, q + 1); }
 
 int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {
     HvVirtq *q = &v->q[qi];
