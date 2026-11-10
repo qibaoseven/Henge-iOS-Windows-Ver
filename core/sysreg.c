@@ -355,7 +355,10 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
         /* BaseADDR is VA[36+shift:shift], sign-extended so TTBR1 ranges come out as kernel VAs. */
         uint64_t va = shift ? (uint64_t)((int64_t)((xt & 0x1fffffffffull) << (64 - 37)) >> (64 - 37 - shift)) : 0;
         uint64_t len = shift ? pages << shift : 0;
-        if (!shift || len > (256ull << HV_TLB_PAGE_BITS)) {
+        /* Past this many pages, page-by-page would cost more than scanning the tables: the threshold is
+           pages of the guest's own granule (shift), not of the TLB's, so a guest that maps 16 KB or 64 KB
+           pages takes the same path it did before the TLB went to 4 KB. */
+        if (!shift || len > (4096ull << shift)) {
             /* Reserved granule: everything. A big range: what of that half lies in it. */
             if (!shift) cpu->m->stats.flush_why[6]++, hv_tlb_flush(cpu);
             else if ((va >> 55) & 1) hv_tlb_flush_kernel_range(cpu, va, len);

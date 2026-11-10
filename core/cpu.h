@@ -11,11 +11,17 @@ enum HvHaltReason {
 };
 
 /* One software TLB entry. host = guest VA + addend. The exec tag is the guest
-   VA of the 16 KB page. The read and write tags are that minus HV_TLB_ADJ, so
+   VA of the 4 KB page. The read and write tags are that minus HV_TLB_ADJ, so
    translated code checks "same page, and the access ends in it" for any access
    of up to 16 bytes with one subtract and shift: VA - tag = offset + 15 must
-   be below 16 KB. (An access in a page's last 15 bytes takes the slow path.)
-   Invalid tags are HV_TLB_INVALID, which no address minus it brings near 0. */
+   be below 4 KB. (An access in a page's last 15 bytes takes the slow path.)
+   Invalid tags are HV_TLB_INVALID, which no address minus it brings near 0.
+
+   The page is 4 KB because Windows on ARM64 maps its kernel and every process
+   with 4 KB granules and cannot be told otherwise; a guest that uses 16 KB or
+   64 KB granules is served by several entries, one per 4 KB of what it maps
+   (see tlb_fill). A 4 KB page still holds an access of up to HV_TLB_ADJ + 1
+   bytes whole, so the one-instruction check is unchanged. */
 typedef struct HvTlbEntry {
     uint64_t read_tag;
     uint64_t write_tag;
@@ -29,10 +35,13 @@ static inline uint64_t hv_exec_key(uint64_t page_va, int64_t addend) {
     return page_va ^ ((uint64_t)addend >> 20 | (uint64_t)addend << 44);
 }
 
-#define HV_TLB_PAGE_BITS 14
+#define HV_TLB_PAGE_BITS 12
 #define HV_TLB_ADJ 15
 #define HV_TLB_INVALID 0x8080808080808080ull /* what memset(0x80) leaves */
-#define HV_TLB_BITS 14 /* 16384 entries per EL: 256 MB of 16 KB pages (xnu's working set overflowed 64 MB) */
+/* 16384 entries per EL: 64 MB of 4 KB pages. The same 16384 entries covered 256 MB while pages were
+   16 KB; a 4 KB TLB holds a quarter of the reach for the same memory, and HV_TLB_SIZE stays put so
+   HvCpu's layout (and the offsets translated code carries) does not move. */
+#define HV_TLB_BITS 14
 #define HV_TLB_SIZE (1u << HV_TLB_BITS)
 #define HV_IJC_TABLES 16
 #define HV_RET_BITS 13 /* entries in a return table */

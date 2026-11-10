@@ -355,6 +355,8 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
 void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     if (cpu->m && cpu->m->stats_interval) cpu->m->stats.kernel_ranges++;
     uint64_t first = va & ~(uint64_t)PAGE_MASK;
+    /* The page-by-page path costs one entry lookup per TLB page; past 4096 of them a table scan is cheaper
+       (that is 16 MB of 4 KB pages, 64 MB of the 16 KB pages this used to step). */
     if (len <= (4096ull << HV_TLB_PAGE_BITS)) {
         for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, p, -1);
         return;
@@ -625,16 +627,17 @@ void hv_kva_hist_dump(FILE *f) {
         if (kva_fills[g]) fprintf(f, "kva gb %d fills %llu pages %llu\n", g, (unsigned long long)kva_fills[g], (unsigned long long)kva_pages_n[g]);
 }
 
-static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
-    if ((va >> 55) & 1) kva_note(va & ~(uint64_t)PAGE_MASK);
-    if (w->block_size < (1ull << HV_TLB_PAGE_BITS)) return; /* smaller guest pages: slow path only */
-    HvRam *ram = ram_of(cpu->m, w->pa);
+/* Fill the TLB entry covering the 4 KB page of `va`, from a walk that mapped
+   [w->pa, +w->block_size) with the permissions in w. `page_pa_base` is the
+   physical base of that 4 KB page. */
+static void fill_one(HvCpu *cpu, uint64_t va, int el, const HvWalk *w, uint64_t page_pa) {
+    const uint64_t sz = 1ull << HV_TLB_PAGE_BITS;
+    HvRam *ram = ram_of(cpu->m, page_pa);
     if (!ram) return;
-    uint64_t page_pa = w->pa & ~PAGE_MASK;
-    if (page_pa < ram->pa || page_pa + PAGE_MASK + 1 - ram->pa > ram->size) return;
-    uint64_t pg = (page_pa - ram->pa) >> HV_TLB_PAGE_BITS;
-    uint64_t page_va = va & ~PAGE_MASK;
+    if (page_pa < ram->pa || page_pa + sz - ram->pa > ram->size) return;
     int table = hv_tlb_table(cpu, el);
+    uint64_t page_va = va & ~PAGE_MASK;
+    uint64_t pg = (page_pa - ram->pa) >> HV_TLB_PAGE_BITS;
     uint32_t slot = (uint32_t)(va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
     HvTlbEntry *e = hv_tlb_ent(cpu, slot, table);
     if (!((page_va >> 55) & 1)) {
@@ -642,7 +645,7 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
         if (cpu->nuser_fills <= HV_USER_FILLS) cpu->nuser_fills++;
     } else {
         if (cpu->nkernel_fills < HV_KERNEL_FILLS) cpu->kernel_fills[cpu->nkernel_fills] = (uint16_t)hv_tlb_code(slot, table);
-        if (cpu->nkernel_fills <= HV_KERNEL_FILLS) cpu->nkernel_fills++;
+        if (cpu->nkernel_fills <= HV_KERNEL_FILLS) cpu->kernel_fills[cpu->nkernel_fills]++;
     }
     e->addend = (int64_t)((uint64_t)(uintptr_t)(ram->host + (page_pa - ram->pa)) - page_va);
     e->read_tag = w->r ? page_va - HV_TLB_ADJ : HV_TLB_INVALID;
@@ -654,6 +657,33 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
     if (cpu->m->watch_pa && (cpu->m->watch_pa & ~PAGE_MASK) == page_pa) e->write_tag = HV_TLB_INVALID;
     e->exec_tag = w->x ? hv_exec_key(page_va, e->addend) : HV_TLB_INVALID;
     if (e->write_tag != HV_TLB_INVALID) write_guard(cpu, ram, pg, hv_tlb_code(slot, table), e);
+}
+
+/* Entries one walk may fill ahead: a 64 KB guest page is 16 of them. A block
+   mapping (2 MB, 1 GB) is left to walk page by page -- a 1 GB block is more
+   entries than the TLB holds, and filling it would evict more than it saves. */
+#define HV_FILL_AHEAD 16
+
+static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
+    if ((va >> 55) & 1) kva_note(va & ~(uint64_t)PAGE_MASK);
+    const uint64_t sz = 1ull << HV_TLB_PAGE_BITS;
+    if (w->block_size < sz) return; /* smaller guest pages than ours: slow path only */
+    uint64_t page_pa = w->pa & ~PAGE_MASK;
+    HvRam *ram = ram_of(cpu->m, page_pa);
+    if (!ram) return;
+    if (page_pa < ram->pa || page_pa + sz - ram->pa > ram->size) return;
+    fill_one(cpu, va, el, w, page_pa);
+
+    /* A guest page of 16 KB or 64 KB: fill the rest of it now, so the next
+       three or fifteen 4 KB pages inside it need no walk of their own. */
+    if (w->block_size >= (1ull << 14) && w->block_size <= ((uint64_t)HV_FILL_AHEAD << HV_TLB_PAGE_BITS)) {
+        uint64_t npages = w->block_size / sz;
+        for (uint64_t i = 1; i < npages; i++) {
+            uint64_t pa = page_pa + i * sz;
+            if (pa + sz - ram->pa > ram->size) break;
+            fill_one(cpu, va + i * sz, el, w, pa);
+        }
+    }
 }
 
 /* Walks that may fill the TLB are bracketed by the CPU's walk_seq (odd while
