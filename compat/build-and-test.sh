@@ -26,6 +26,11 @@ echo "== compiling the engine"
 for f in classify operands translate dispatch memop exception sysreg machine; do
     $CC $CFLAGS -c "core/$f.c" -o "$OUT/$f.o"
 done
+# The virt machine's pieces, which the Windows direction needs and which build
+# without a JIT: their test drives the device callbacks through the MMIO map.
+for f in pflash fw_cfg virt gicv3 pl011 pl031 pl061 pcie timer; do
+    $CC $CFLAGS -Idevices -c "devices/$f.c" -o "$OUT/dev_$f.o"
+done
 # mmu.c must not use SIMD: hv_tlb_refill runs with the guest's vectors live.
 $CC $CFLAGS -mgeneral-regs-only -c core/mmu.c -o "$OUT/mmu.o"
 $CC $CFLAGS -c host/jit_region.c -o "$OUT/jit_region.o"
@@ -50,6 +55,10 @@ $CC $CFLAGS tests/test_mmu.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_mmu"
 # A test keeps a whole HvCpu (2 MB of TLB and more) on its stack.
 ulimit -s 65520 2>/dev/null || true
 "$OUT/test_mmu"
+
+echo "== test_virt"
+$CC $CFLAGS -Idevices tests/test_virt.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_virt"
+"$OUT/test_virt"
 
 cat <<'EOF'
 
