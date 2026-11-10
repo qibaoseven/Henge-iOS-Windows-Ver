@@ -15,6 +15,12 @@ static uint8_t *pt;
 static uint64_t pt_next;
 static int failures, checks;
 
+/* A page the TLB indexes now is 4 KB; the code-page tests below are written in
+   terms of the 16 KB pages the RAM used to be divided into, so a page number
+   there maps here. */
+static uint64_t tlb_page_of_16k(unsigned n) { return (uint64_t)n << 14; }
+static uint32_t tlb_pg(unsigned n) { return (uint32_t)((tlb_page_of_16k(n)) >> HV_TLB_PAGE_BITS); }
+
 static uint64_t *host(uint64_t pa) {
     return (uint64_t *)(pt + (pa - PT_PA));
 }
@@ -183,7 +189,7 @@ int main(void) {
             hv_tlb_flush(&cpu);
             int table = (bases[b] >> 55) & 1 ? 1 : 0;
             for (int k = 0; k < 8; k++) {
-                uint64_t va = bases[b] + ((uint64_t)k << 14);
+                uint64_t va = bases[b] + ((uint64_t)k << 14); /* one per 16 KB guest page */
                 HvTlbEntry *t = &(*hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table));
                 t->read_tag = va - HV_TLB_ADJ;
                 t->addend = 0;
@@ -213,12 +219,12 @@ int main(void) {
             hv_tlb_flush(&cpu);
             const int32_t ks[6] = {0, 1, (int32_t)ranges[r].pages / 2, (int32_t)ranges[r].pages - 1, (int32_t)ranges[r].pages, (int32_t)ranges[r].pages + 300};
             for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
                 HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1);
                 t->read_tag = va - HV_TLB_ADJ;
                 t->addend = 0;
             }
-            uint64_t uva = 0x100000000ull + ((uint64_t)7000 << 14); /* a process's page, in a slot outside the range's */
+            uint64_t uva = 0x100000000ull + ((uint64_t)7000 << HV_TLB_PAGE_BITS); /* a process's page, in a slot outside the range's */
             HvTlbEntry *u = hv_tlb_ent(&cpu, (uva >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 0);
             u->read_tag = uva - HV_TLB_ADJ;
             u->addend = 0;
@@ -226,13 +232,19 @@ int main(void) {
             cpu.x[1] = 0ull << 48 | 2ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 14) & 0x1fffffffffull);
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
                 int dropped = hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
                 checks++;
                 if (dropped != (ks[k] < (int32_t)ranges[r].pages)) {
                     printf("  FAIL big kernel range %u pages, page %d: %s\n", ranges[r].pages, ks[k], dropped ? "dropped" : "kept");
                     failures++;
                 }
+            }
+            for (int k = 0; k < 6; k++) {
+                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
+                fprintf(stderr, "DBG range=%u page=%d va=%llx slot=%llu dropped=%d\n", ranges[r].pages, ks[k],
+                        (unsigned long long)va, (unsigned long long)((va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)),
+                        hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID);
             }
             checks++;
             if (hv_tlb_ent(&cpu, (uva >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 0)->read_tag == HV_TLB_INVALID) {
@@ -331,9 +343,9 @@ int main(void) {
                 hv_ijc_fill(&cpu, &fb[i]);
                 ents[i] = m.percpu[0].ijc + (size_t)hv_ijc_index(fb[i].va ^ salt) * 2;
             }
-            r->code_pages[10] = 1;
-            r->ijc_va[10] = cases[c].note;
-            hv_invalidate_code(&m, r->pa + (10ull << 14));
+            r->code_pages[tlb_pg(10)] = 1;
+            r->ijc_va[tlb_pg(10)] = cases[c].note;
+            hv_invalidate_code(&m, r->pa + tlb_page_of_16k(10));
             for (int i = 0; i < 2; i++) {
                 int kept = ents[i][0] == (fb[i].va ^ salt) && cpu.ijc_salt[0] == salt;
                 checks++;
@@ -343,7 +355,7 @@ int main(void) {
                 }
             }
             checks++;
-            if (r->ijc_va[10] != 0) printf("  FAIL code change left the page's note\n"), failures++;
+            if (r->ijc_va[tlb_pg(10)] != 0) printf("  FAIL code change left the page's note\n"), failures++;
         }
         hv_knob[HV_K_IJCPAGES] = knob;
         hv_self = self;
@@ -355,7 +367,7 @@ int main(void) {
         HvRam *r = &m.ram[0];
         uint32_t base = m.nslots + 16, pages[4] = {10, 11, 10, 10}, n0 = m.nxchained;
         for (uint32_t i = 0; i < 4; i++) {
-            uint32_t idx = base + i, pg = pages[i];
+            uint32_t idx = base + i, pg = tlb_pg(pages[i]);
             m.slots[idx] = 0x1000 + i;
             m.slot_site[idx] = NULL;
             m.slot_xpa[idx] = (r->pa + ((uint64_t)pg << HV_TLB_PAGE_BITS)) | 1;
@@ -363,21 +375,21 @@ int main(void) {
             r->xhead[pg] = idx + 1;
             m.nxchained++;
         }
-        r->code_pages[10] = 1;
-        hv_invalidate_code(&m, r->pa + (10ull << 14) + 0x40);
+        r->code_pages[tlb_pg(10)] = 1;
+        hv_invalidate_code(&m, r->pa + tlb_page_of_16k(10) + 0x40);
         for (uint32_t i = 0; i < 4; i++) {
             int gone = m.slots[base + i] == 0 && m.slot_xpa[base + i] == 0;
             checks++;
             if (gone != (pages[i] == 10)) printf("  FAIL code change %s an exit chained into page %u\n", gone ? "unchained" : "kept", pages[i]), failures++;
         }
         checks += 3;
-        if (r->xhead[10]) printf("  FAIL the changed page's list is not empty\n"), failures++;
-        if (r->xhead[11] != base + 2) printf("  FAIL the other page's list changed\n"), failures++;
+        if (r->xhead[tlb_pg(10)]) printf("  FAIL the changed page's list is not empty\n"), failures++;
+        if (r->xhead[tlb_pg(11)] != base + 2) printf("  FAIL the other page's list changed\n"), failures++;
         if (m.nxchained != n0 + 1) printf("  FAIL chained count %u, want %u\n", m.nxchained, n0 + 1), failures++;
-        r->code_pages[11] = 1;
-        hv_invalidate_code(&m, r->pa + (11ull << 14));
+        r->code_pages[tlb_pg(11)] = 1;
+        hv_invalidate_code(&m, r->pa + tlb_page_of_16k(11));
         checks++;
-        if (m.slots[base + 1] || r->xhead[11] || m.nxchained != n0) printf("  FAIL the second page's exit stayed chained\n"), failures++;
+        if (m.slots[base + 1] || r->xhead[tlb_pg(11)] || m.nxchained != n0) printf("  FAIL the second page's exit stayed chained\n"), failures++;
     }
 
     /* Another CPU's big range TLBI (64 user pages of ASID 5: over the 32 done from here by default). With HV_RANGE_DROP it is done from here in one pass:
@@ -436,7 +448,7 @@ int main(void) {
         hv_knob[HV_K_RANGEDROP] = 0;
         /* A target in the middle of a page walk (of a page in the range): raced, so it is queued instead. */
         hv_tlb_flush(&cpu2);
-        p2->walk_page[(p2->walk_seq >> 1) & 7] = base + (3ull << 14);
+        p2->walk_page[(p2->walk_seq >> 1) & 7] = base + (3ull << HV_TLB_PAGE_BITS);
         __atomic_store_n(&p2->walk_seq, p2->walk_seq | 1, __ATOMIC_SEQ_CST);
         checks++;
         if (hv_tlbi_drop_remote_range(&cpu2, base, 64, 5) != 0) printf("  FAIL remote range ignored a page walk in progress\n"), failures++;
@@ -453,7 +465,7 @@ int main(void) {
         struct { const char *what; uint64_t walked; int knob, range, want; } cases[] = {
             {"a walk of another page", Q, 1, 0, 1},       {"a walk of the page", P + 0x10, 1, 0, 0},
             {"a process switch", ~0ull, 1, 0, 0},         {"a walk of another page, knob off", Q, 0, 0, 0},
-            {"a range with the walked page in it", Q, 1, 1, 0}, {"a range without it", Q + (8ull << 14), 1, 1, 1},
+            {"a range with the walked page in it", Q, 1, 1, 0}, {"a range without it", Q + (8ull << HV_TLB_PAGE_BITS), 1, 1, 1},
             {"a tagged walk of another page", 0x5a00000000000000ull | Q, 1, 0, 1},
             {"a tagged walk of the page", 0x5a00000000000000ull | P, 1, 0, 0},
         };
