@@ -508,6 +508,9 @@ void hv_tlb_flush_va_page(HvCpu *cpu, uint64_t va, int asid) {
     }
 }
 
+/* TLB pages in the 32 MB chunks the branch cache notes its fills by (va >> 25). */
+#define CHUNK_PAGES (25 - HV_TLB_PAGE_BITS)
+
 /* A TLBI by range too big to do page by page in the TLB (which then drops its
    user half): forget cached branch targets only in the range's code pages. */
 void hv_ijc_drop_range(HvCpu *cpu, uint64_t va, uint64_t len, int asid) {
@@ -534,22 +537,24 @@ void hv_ijc_drop_range(HvCpu *cpu, uint64_t va, uint64_t len, int asid) {
         }
     }
     /* Page by page, but only in the range's 32 MB chunks that hold cached targets (a big unmapping, a heap or a
-       file, mostly holds none); past 4096 such pages, scanning costs more than the cold start: drop the address space. */
+       file, mostly holds none); past 64 MB worth of pages, scanning costs more than the cold start: drop the address
+       space. The limit is a span, so the page count follows the page size (4096 pages of 16 KB, then). */
+    const uint64_t max_pages = 64ull << 20 >> HV_TLB_PAGE_BITS;
     uint64_t c0 = va >> 25, c1 = (va + len - 1) >> 25, n = 0;
     int wide = c1 - c0 >= 255; /* the chunk bits wrap at 8 GB */
-    for (uint64_t c = c0; !wide && c <= c1 && n < 4096; c++)
+    for (uint64_t c = c0; !wide && c <= c1 && n < max_pages; c++)
         if (cpu->pc_state->cid_chunks[cid][(c & 255) >> 6] >> (c & 63) & 1) {
-            uint64_t a = c << 11 > first ? c << 11 : first, b = ((c + 1) << 11) - 1 < last ? ((c + 1) << 11) - 1 : last;
+            uint64_t a = (c << CHUNK_PAGES) > first ? (c << CHUNK_PAGES) : first, b = (((c + 1) << CHUNK_PAGES) - 1) < last ? (((c + 1) << CHUNK_PAGES) - 1) : last;
             n += b - a + 1;
         }
-    if (wide || n >= 4096) {
+    if (wide || n >= max_pages) {
         if (m->stats_interval) m->stats.ijc_reset_kind[3]++;
         hv_ijc_drop_asid(cpu, (uint16_t)asid);
         return;
     }
     for (uint64_t c = c0; c <= c1; c++) {
         if (!(cpu->pc_state->cid_chunks[cid][(c & 255) >> 6] >> (c & 63) & 1)) continue;
-        uint64_t a = c << 11 > first ? c << 11 : first, b = ((c + 1) << 11) - 1 < last ? ((c + 1) << 11) - 1 : last;
+        uint64_t a = (c << CHUNK_PAGES) > first ? (c << CHUNK_PAGES) : first, b = (((c + 1) << CHUNK_PAGES) - 1) < last ? (((c + 1) << CHUNK_PAGES) - 1) : last;
         for (uint64_t p = a; p <= b; p++)
             if (ucode_has(cpu->pc_state, cid, p << HV_TLB_PAGE_BITS)) {
                 m->stats.reset_why[2]++;
@@ -693,7 +698,7 @@ static void tlb_fill(HvCpu *cpu, uint64_t va, int el, const HvWalk *w) {
    HV_WALK_ANY: a process switch, which saves and restores many entries and the stashes. */
 #define HV_WALK_ANY (~0ull)
 #define WALK_LOG 8
-#define WALK_PAGE_BITS 0x00ffffffffffc000ull /* by the low 56 bits, as drops compare tagged addresses */
+#define WALK_PAGE_BITS ((~((1ull << HV_TLB_PAGE_BITS) - 1)) & 0x00ffffffffffffffull) /* the TLB page, in the low 56 bits */
 
 static void walk_begin(HvCpu *cpu, uint64_t va) {
     HvPerCpu *p = cpu->pc_state;

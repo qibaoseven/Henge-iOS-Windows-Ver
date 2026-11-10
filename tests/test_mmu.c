@@ -219,7 +219,7 @@ int main(void) {
             hv_tlb_flush(&cpu);
             const int32_t ks[6] = {0, 1, (int32_t)ranges[r].pages / 2, (int32_t)ranges[r].pages - 1, (int32_t)ranges[r].pages, (int32_t)ranges[r].pages + 300};
             for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
+                uint64_t va = base + ((uint64_t)ks[k] << 14); /* ks[] counts 16 KB guest pages, as the TLBI does */
                 HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1);
                 t->read_tag = va - HV_TLB_ADJ;
                 t->addend = 0;
@@ -232,19 +232,13 @@ int main(void) {
             cpu.x[1] = 0ull << 48 | 2ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 14) & 0x1fffffffffull);
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
+                uint64_t va = base + ((uint64_t)ks[k] << 14);
                 int dropped = hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
                 checks++;
                 if (dropped != (ks[k] < (int32_t)ranges[r].pages)) {
                     printf("  FAIL big kernel range %u pages, page %d: %s\n", ranges[r].pages, ks[k], dropped ? "dropped" : "kept");
                     failures++;
                 }
-            }
-            for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
-                fprintf(stderr, "DBG range=%u page=%d va=%llx slot=%llu dropped=%d\n", ranges[r].pages, ks[k],
-                        (unsigned long long)va, (unsigned long long)((va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1)),
-                        hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID);
             }
             checks++;
             if (hv_tlb_ent(&cpu, (uva >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 0)->read_tag == HV_TLB_INVALID) {
@@ -262,7 +256,7 @@ int main(void) {
         cpu.ttbr0_el1 = 7ull << 48;
         hv_ijc_switch(&cpu);
         uint64_t salt = cpu.ijc_salt[0];
-        static const uint64_t vas[3] = {0x100004010ull, 0x100007ffcull, 0x100008010ull}; /* page P twice, then page Q */
+        static const uint64_t vas[3] = {0x100004010ull, 0x100004ffcull, 0x100008010ull}; /* page P twice, then page Q */
         uint64_t *ents[3];
         static HvBlock fake[3];
         for (int i = 0; i < 3; i++) {
@@ -420,7 +414,7 @@ int main(void) {
             st->ent[1] = (HvTlbEntry){.read_tag = base + (200ull << HV_TLB_PAGE_BITS) - HV_TLB_ADJ, .write_tag = HV_TLB_INVALID, .exec_tag = HV_TLB_INVALID};
             p2->nreq = 0, p2->req_flags = 0;
             cpu.el = 1;
-            cpu.x[1] = 5ull << 48 | 2ull << 46 | 0ull << 44 | 31ull << 39 | ((base >> 14) & 0x1fffffffffull); /* (31+1) << 1 = 64 pages */
+            cpu.x[1] = 5ull << 48 | 1ull << 46 | 0ull << 44 | 31ull << 39 | ((base >> 12) & 0x1fffffffffull); /* TG 4 KB, (31+1) << 1 = 64 pages */
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             int queued = p2->nreq != 0 || p2->req_flags != 0;
             checks++;
@@ -448,6 +442,8 @@ int main(void) {
         hv_knob[HV_K_RANGEDROP] = 0;
         /* A target in the middle of a page walk (of a page in the range): raced, so it is queued instead. */
         hv_tlb_flush(&cpu2);
+        /* Start from an even sequence: `| 1` then marks one walk as running, at the slot below it. */
+        __atomic_store_n(&p2->walk_seq, p2->walk_seq & ~1u, __ATOMIC_SEQ_CST);
         p2->walk_page[(p2->walk_seq >> 1) & 7] = base + (3ull << HV_TLB_PAGE_BITS);
         __atomic_store_n(&p2->walk_seq, p2->walk_seq | 1, __ATOMIC_SEQ_CST);
         checks++;
@@ -472,10 +468,11 @@ int main(void) {
         for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
             hv_knob[HV_K_WALKLOG] = cases[c].knob;
             uint32_t seq = __atomic_load_n(&p3->walk_seq, __ATOMIC_SEQ_CST) & ~1u;
-            uint64_t pg = cases[c].walked == ~0ull ? ~0ull : cases[c].walked & 0x00ffffffffffc000ull;
+            uint64_t pg = cases[c].walked == ~0ull ? ~0ull
+                        : cases[c].walked & ~((1ull << HV_TLB_PAGE_BITS) - 1) & 0x00ffffffffffffffull;
             p3->walk_page[(seq >> 1) & 7] = pg;
             __atomic_store_n(&p3->walk_seq, seq + 1, __ATOMIC_SEQ_CST);
-            int r = cases[c].range ? hv_tlbi_drop_remote_range(&cpu3, P, 2, 5) : hv_tlbi_drop_remote_va(&cpu3, P, 5);
+            int r = cases[c].range ? hv_tlbi_drop_remote_range(&cpu3, P, (uint64_t)(Q - P) / (1ull << HV_TLB_PAGE_BITS) + 1, 5) : hv_tlbi_drop_remote_va(&cpu3, P, 5);
             __atomic_store_n(&p3->walk_seq, seq + 2, __ATOMIC_SEQ_CST);
             checks++;
             if ((r == 1) != cases[c].want) {

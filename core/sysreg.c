@@ -501,11 +501,14 @@ int hv_sysreg_sys(HvCpu *cpu, uint32_t insn, uint64_t pc) {
             /* A small range (RVAE1IS and kin): page by page, the same way. */
             uint64_t npages = 0;
             int by_range = crn == 8 && op1 == 0 && (crm == 2 || crm == 5) && (op2 & 1);
-            if (by_range && ((xt >> 46) & 3) == 2) { /* 16 KB granule, as xnu uses */
-                npages = (((xt >> 39) & 31) + 1) << (5 * ((xt >> 44) & 3) + 1);
-                va = (uint64_t)((int64_t)((xt & 0x1fffffffffull) << (64 - 37)) >> (64 - 37 - 14));
-                /* HV_RANGE_DROP=N: ranges up to N pages are done from here too, in one pass (hv_tlbi_drop_remote_range) */
-                if (npages > (hv_knob[HV_K_RANGEDROP] > 32 ? (uint64_t)hv_knob[HV_K_RANGEDROP] : 32)) npages = 0;
+            uint32_t rshift = (uint32_t)(((xt >> 46) & 3) == 1 ? 12 : ((xt >> 46) & 3) == 2 ? 14 : ((xt >> 46) & 3) == 3 ? 16 : 0);
+            if (by_range && rshift) {
+                uint64_t gpages = (((xt >> 39) & 31) + 1) << (5 * ((xt >> 44) & 3) + 1);
+                va = (uint64_t)((int64_t)((xt & 0x1fffffffffull) << (64 - 37)) >> (64 - 37 - rshift));
+                /* HV_RANGE_DROP=N: ranges up to N pages are done from here too, in one pass (hv_tlbi_drop_remote_range).
+                   Counted in the guest's pages, as the instruction says. */
+                if (gpages > (hv_knob[HV_K_RANGEDROP] > 32 ? (uint64_t)hv_knob[HV_K_RANGEDROP] : 32)) npages = 0;
+                else npages = gpages << (rshift - HV_TLB_PAGE_BITS); /* the drops below step TLB pages */
             } else if (by_va) {
                 npages = 1;
             }
