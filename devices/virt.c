@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include "dtb.h"
 #include "pcie.h"
 #include "timer.h"
 
@@ -38,10 +39,24 @@ int hv_virt_create(HvVirt *b, HvMachine *m, HvCpu *cpus, int ncpus, uint64_t ram
     b->ncpus = ncpus < 1 ? 1 : ncpus;
     b->ram_size = ram_size;
 
-    /* Guest RAM: reserved, not committed, as the rest of the engine assumes. */
+    /* Guest RAM: reserved, not committed, as the rest of the engine assumes.
+       The first megabyte holds the DT, so the firmware's RAM starts after it. */
+    if (ram_size <= VIRT_DTB_SIZE) return -1;
     b->ram = mmap(NULL, (size_t)ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (b->ram == MAP_FAILED) return -1;
     if (hv_machine_add_ram(m, VIRT_RAM_BASE, ram_size, b->ram, 0) != 0) goto fail;
+
+    /* The tree the firmware will read. Written before anything can execute, and
+       never touched again: it describes the map, not the state. */
+    b->dtb_len = hv_dtb_build(b->ram, VIRT_DTB_SIZE, VIRT_GUEST_RAM, ram_size - VIRT_DTB_SIZE, (uint32_t)b->ncpus);
+    if (!b->dtb_len) {
+        fprintf(stderr, "hengevm: the device tree did not fit in %llu bytes\n", (unsigned long long)VIRT_DTB_SIZE);
+        goto fail;
+    }
+    if (m->log)
+        fprintf(stderr, "hengevm: device tree %llu bytes at %llx; RAM %llu MiB at %llx\n", (unsigned long long)b->dtb_len,
+                (unsigned long long)VIRT_DTB_PA, (unsigned long long)((ram_size - VIRT_DTB_SIZE) >> 20),
+                (unsigned long long)VIRT_GUEST_RAM);
 
     /* The flash window: UEFI's entry point is here, at 0x0. */
     b->flash = hv_pflash_create(m, VIRT_FLASH_BASE, VIRT_FLASH_SIZE / 2, VIRT_FLASH_SIZE / 2,
@@ -86,6 +101,7 @@ void hv_virt_reset_cpu(HvVirt *b) {
         hv_cpu_reset_index(c, b->m, (uint32_t)i);
         c->mpidr = (uint32_t)i; /* Aff0 = index, as QEMU's virt numbers its CPUs */
         c->pc = VIRT_FLASH_BASE; /* UEFI's entry, in the code flash */
+        c->x[0] = VIRT_DTB_PA;   /* the DT, as the arm64 boot protocol passes it */
         c->off = i != 0;         /* secondaries wait for PSCI CPU_ON */
     }
 }

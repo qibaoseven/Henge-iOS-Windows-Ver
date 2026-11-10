@@ -36,13 +36,16 @@
 #define VIRT_PCIE_ECAM_SIZE 0x01000000ull
 #define VIRT_PCIE_INTX    0x30 /* INTID of SPI 16: what QEMU's gpex uses for slot 0 */
 
-/* Low RAM, above the flash window: UEFI's DTB and later the ACPI tables live
-   here, at fixed addresses (see virt.c). */
+/* The DT sits at the bottom of RAM, and RAM starts after it: a DT inside the
+   region the firmware is told is free memory gets written over. UEFI finds it
+   from x0 at reset, not by searching. */
 #define VIRT_RAM_BASE     0x40000000ull
 #define VIRT_DTB_PA       0x40000000ull
-#define VIRT_DTB_SIZE     0x00100000ull /* 1 MB reserved for the DTB */
+#define VIRT_DTB_SIZE     0x00100000ull /* 1 MB: the tree itself is ~65 KB */
+#define VIRT_GUEST_RAM    0x40100000ull /* where the firmware's memory starts */
+/* Room for the ACPI tables when they arrive (M2), well inside the 48-bit PA space. */
 #define VIRT_ACPI_BASE    0x48000000ull
-#define VIRT_ACPI_SIZE    0x00100000ull /* 1 MB of tables, well inside the 48-bit PA space */
+#define VIRT_ACPI_SIZE    0x00100000ull
 
 typedef struct HvVirt {
     HvMachine *m;
@@ -56,6 +59,7 @@ typedef struct HvVirt {
     HvPl061 *gpio;
     HvPflash *flash;
     HvFwCfg *fw;
+    uint64_t dtb_len; /* 0: no tree was written */
 } HvVirt;
 
 /* Builds the machine around m and cpus[0..cfg_ncpus). code_path and vars_path

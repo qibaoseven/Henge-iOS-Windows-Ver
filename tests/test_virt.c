@@ -60,20 +60,23 @@ int main(void) {
     if (hv_machine_init(m2, 8u << 20) != 0) return 1;
     HvPflash *pf = hv_pflash_create(m2, 0x0, 0x4000000, 0x4000000, code, vars);
     CHECK(pf != NULL, "pflash create");
-    CHECK(rd(m2, 0x0, 4) == 0x58020000u, "code bank first word (LE as the guest sees it): got %llx",
-          (unsigned long long)rd(m2, 0, 4));
-    CHECK(rd(m2, 0x4000000, 1) == 0x11, "vars bank loaded");
-    /* past the end of what the file filled: erased flash */
-    CHECK(rd(m2, 0x2000, 1) == 0xff, "erased past the image");
-    /* the code bank ignores writes, in the image and past it alike */
-    wr(m2, 0x2000, 0x42, 1);
-    CHECK(rd(m2, 0x2000, 1) == 0xff, "code bank kept erased bytes erased");
-    wr(m2, 0x4, 0x42, 1);
-    CHECK(rd(m2, 0x4, 1) == 0xAA, "code bank image unchanged by a write");
-    /* the vars bank takes them */
-    wr(m2, 0x4000010, 0x42, 1);
-    CHECK(rd(m2, 0x4000010, 1) == 0x42, "vars bank writable");
-    /* and they survive a save/reload */
+    /* Flash is RAM to the engine, because the JIT only fetches from RAM. */
+    HvRam *cr = hv_ram_lookup(m2, 0x0), *vr = hv_ram_lookup(m2, 0x4000000);
+    CHECK(cr && cr->readonly == 1, "code bank is read-only RAM");
+    CHECK(vr && vr->readonly == 0, "vars bank is writable RAM");
+    CHECK(cr->size == 0x4000000 && vr->size == 0x4000000, "each bank 64 MB");
+    /* It is NOT an MMIO device: an MMIO window there would stop the firmware
+       from executing at all. */
+    CHECK(hv_mmio_lookup(m2, 0x0) == NULL, "flash is not behind an MMIO window");
+    /* The image is in the RAM the engine fetches from. */
+    CHECK(cr->host[0] == 0x00 && cr->host[3] == 0x58, "code image in RAM");
+    CHECK(cr->host[0x2000] == 0xff, "erased past the image");
+    CHECK(vr->host[0] == 0x11, "vars bank loaded");
+    /* Code bank writes are refused by the engine (read-only RAM). */
+    hv_phys_write(m2, 0x2000, "\x42", 1);
+    CHECK(cr->host[0x2000] == 0xff, "code bank refused a write");
+    hv_phys_write(m2, 0x4000010, "\x42", 1);
+    CHECK(vr->host[0x10] == 0x42, "vars bank accepted a write");
     CHECK(hv_pflash_save_vars(pf, vars) == 0, "save vars");
     f = fopen(vars, "rb");
     fseek(f, 0x10, SEEK_SET);
