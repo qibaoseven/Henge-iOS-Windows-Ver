@@ -33,7 +33,7 @@ done
 CC=${CC:-cc}
 BIN=build/posix/hv_uefi
 mkdir -p build/posix
-CFLAGS="-std=c11 -O1 -w -D_GNU_SOURCE -Icompat -Icore -Ihost -Idevices -include compat/henge_pthread.h -include compat/henge_ulock.h"
+CFLAGS="-std=c11 -O1 -w -D_GNU_SOURCE -Icompat/shadow -Icompat -Icore -Ihost -Idevices -include compat/henge_pthread.h -include compat/henge_ulock.h"
 OBJS=""
 needs_build=0
 [ -x "$BIN" ] || needs_build=1

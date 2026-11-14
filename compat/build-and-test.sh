@@ -18,7 +18,7 @@ CC=${CC:-cc}
 #   stand-ins have to land before the sources do.
 # -D_GNU_SOURCE: musl hides Dl_info (the profiler names a function by it).
 # -latomic: memop.c does a 128-bit compare-and-exchange (CASP).
-CFLAGS="-std=c11 -O1 -w -D_GNU_SOURCE -Icompat -Icore -Ihost -Itests -include compat/henge_pthread.h -include compat/henge_ulock.h"
+CFLAGS="-std=c11 -O1 -w -D_GNU_SOURCE -Icompat/shadow -Icompat -Icore -Ihost -Idevices -Itests -include compat/henge_pthread.h -include compat/henge_ulock.h"
 
 mkdir -p "$OUT"
 
