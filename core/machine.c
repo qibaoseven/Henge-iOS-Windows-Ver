@@ -436,7 +436,12 @@ int hv_machine_add_ram(HvMachine *m, uint64_t pa, uint64_t size, void *host, int
     while ((1ull << r->pages_log2) < pages) r->pages_log2++;
     /* A power of two, so translated code bounds-checks a page index with one shift (IC IVAU). */
     r->code_pages = calloc((size_t)1 << r->pages_log2, 1);
-    if (!m->main_ram || size > m->main_ram->size) m->main_ram = r;
+    /* main_ram is the region the guest boots from: devices DMA into it, the
+       profiler and the JIT name it, and a guest's firmware expects the lowest
+       RAM to be the one it was handed. Not "the largest": a machine whose RAM
+       is split around a hole (ACPI above 4 GiB, as on QEMU's virt) would
+       otherwise pick the upper half. */
+    if (!m->main_ram || pa < m->main_ram->pa) m->main_ram = r;
     r->page_gen = calloc(pages, sizeof *r->page_gen);
     r->npages = pages;
     r->whint = calloc(pages * HV_MAX_CPUS, sizeof *r->whint);

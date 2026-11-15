@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "acpi.h"
+#include "disk.h"
 #include "fw_cfg.h"
 #include "gicv3.h"
 #include "its.h"
@@ -11,6 +13,9 @@
 #include "pl011.h"
 #include "pl031.h"
 #include "pl061.h"
+#include "virtio_blk.h"
+#include "virtio.h"
+#include "virtio_net.h"
 
 /* QEMU's "virt" machine, which ArmVirtQemu (edk2) is built for and which is the
    shortest path to a firmware Windows will take an interest in.
@@ -36,6 +41,14 @@
 #define VIRT_PCIE_ECAM    0x3F000000ull
 #define VIRT_PCIE_ECAM_SIZE 0x01000000ull
 #define VIRT_PCIE_INTX    0x30 /* INTID of SPI 16: what QEMU's gpex uses for slot 0 */
+#define VIRT_PCI_BUS_MAX  15   /* last bus the ECAM window addresses (16 buses x 1 MB) */
+
+/* The GIC's view of its LPIs, said in the MADT and the IORT so both agree with
+   gicv3.c: INTIDs 8192..8447 are LPIs, everything below is an SPI. */
+#define VIRT_GIC_LPI_BASE 8192u
+#define VIRT_GIC_ITS_ID   0u   /* the one ITS; IORT and the MADT name it by this */
+#define VIRT_COUNTER_HZ   62500000u /* the system counter (timer.c) */
+#define VIRT_ACPI_OEM_TABLE_ID "VIRT0001"
 
 /* The DT sits at the bottom of RAM, and RAM starts after it: a DT inside the
    region the firmware is told is free memory gets written over. UEFI finds it
@@ -44,11 +57,20 @@
 #define VIRT_DTB_PA       0x40000000ull
 #define VIRT_DTB_SIZE     0x00100000ull /* 1 MB: the tree itself is ~65 KB */
 #define VIRT_GUEST_RAM    0x40100000ull /* where the firmware's memory starts */
-/* Room for the ACPI tables when they arrive (M2), well inside the 48-bit PA space. */
+/* The ACPI region: the tables are built here (host memory) and published as
+   fw_cfg files, and the guest's RAM does not go through it. RAM continues at
+   VIRT_RAM_HIGH, which is how a 4 GiB guest gets its memory with the tables
+   where every arm64 firmware expects to find them. */
 #define VIRT_ACPI_BASE    0x48000000ull
 #define VIRT_ACPI_SIZE    0x00100000ull
+#define VIRT_RAM_HIGH     0x100000000ull
 
 typedef struct HvVirt {
+    /* Set before hv_virt_create: the disk image to attach (NULL: none) and
+       whether it may be written. The NIC always exists. */
+    const char *disk_path;
+    int disk_ro;
+
     HvMachine *m;
     HvCpu *cpu;
     int ncpus;
@@ -62,6 +84,17 @@ typedef struct HvVirt {
     HvFwCfg *fw;
     HvIts *its;
     uint64_t dtb_len; /* 0: no tree was written */
+    uint8_t *ram_hi;  /* the part above 4 GiB, or NULL */
+    uint64_t ram_hi_size;
+    HvPcie *pci;
+    /* The ACPI set: built once, published through fw_cfg, kept for the life of
+       the machine (the firmware reads it byte by byte, at its own pace). */
+    uint8_t acpi_blob[ACPI_MAX_SIZE];
+    HvAcpi acpi;
+    uint32_t acpi_bytes;
+    HvVirtioBlk *blk;
+    HvDisk disk;
+    HvVirtioNet *net;
 } HvVirt;
 
 /* Builds the machine around m and cpus[0..cfg_ncpus). code_path and vars_path

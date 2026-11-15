@@ -21,7 +21,7 @@ enum {
     FADT_SIZE = 276,           /* ACPI 6.3, no Hypervisor Vendor Id (as QEMU) */
     MADT_GICC_SIZE = 80,
     MADT_GICD_SIZE = 24,
-    MADT_GICR_SIZE = 16,
+    MADT_GICR_SIZE = 24,
     MADT_ITS_SIZE = 20,
     GTDT_SIZE = 88,
     MCFG_SIZE = 60,
@@ -352,9 +352,13 @@ static uint32_t build_fadt(uint8_t *p, uint64_t dsdt_pa, const HvAcpiParams *pr)
     uint8_t *b = p + HDR_SIZE;
     put32(b + 4, (uint32_t)dsdt_pa);     /* DSDT */
     put32(b + 80, (1u << 20));           /* FLAGS: HW_REDUCED_ACPI */
-    /* ARM_BOOT_ARCH at 109..110: PSCI compliant + use HVC */
-    put16(b + 109, 0x3);
-    b[111] = 3;                          /* MINOR_VERSION */
+    /* ARM_BOOT_ARCH at 109..110: bit 0 PSCI compliant, bits 1-2 the conduit
+       (0 none, 1 smc, 2 hvc, 3 both). There is no EL3 here, so smc traps to
+       nothing: HVC is the only conduit that works, and it is what the DT's
+       /psci says. Saying "both" (QEMU's 0x3) would let a guest try smc first
+       and hang. MINOR_VERSION follows the DT's /psci version. */
+    put16(b + 109, (uint16_t)(1u | (pr->psci_conduit << 1)));
+    b[111] = pr->psci_version ? pr->psci_version : 2; /* MINOR_VERSION: PSCI 0.2 */
     put64(b + 120, dsdt_pa);             /* X_DSDT */
     /* Every PM block stays zero: the machine is HW-reduced. */
     fix_checksum(p, FADT_SIZE);
@@ -409,21 +413,28 @@ static uint32_t build_madt(uint8_t *p, const HvAcpiParams *pr)
         q += MADT_GICC_SIZE;
     }
 
-    /* 5.2.12.17 GIC Redistributor Structure: 16 bytes, covers all CPUs */
+    /* 5.2.12.17 GIC Redistributor Structure: 24 bytes with the range fields */
     q[0] = 0x0e;
     q[1] = MADT_GICR_SIZE;
     put16(q + 2, 0);
-    put64(q + 4, pr->gic_redist);
-    put32(q + 12, (uint32_t)((uint64_t)ncpus * 0x20000ull));
+    put32(q + 4, 0); /* GIC Redistributor ID */
+    /* 12 GICR base, 20 discovery range base (0: the same), 20..24 range length.
+       ACPI's own structure is 16 bytes; the range fields extend it to 24. */
+    put64(q + 12, pr->gic_redist);
+    put32(q + 20, (uint32_t)((uint64_t)ncpus * 0x20000ull));
     q += MADT_GICR_SIZE;
 
     /* 5.2.12.18 GIC ITS Structure: 20 bytes (6.0 errata A length) */
     q[0] = 0x0f;
     q[1] = MADT_ITS_SIZE;
     put16(q + 2, 0);
-    put32(q + 4, 0);           /* GIC ITS ID */
-    put64(q + 8, pr->gic_its); /* Physical Base Address */
-    /* q[16..19] reserved */
+    put32(q + 4, pr->gic_its_id); /* GIC ITS ID: IORT's ITS node refers to it */
+    put64(q + 8, pr->gic_its);    /* Physical Base Address */
+    /* 5.2.12.18, ACPI 6.0+: without this field every LPI a device raises is
+       below the ITS's GIC ITS Base and the interrupt is discarded (Windows then
+       reports its virtio queue as "no interrupt"). QEMU writes the GIC's LPI
+       base here; for us that is not 0, because INTIDs below it belong to SPIs. */
+    put32(q + 16, pr->gic_its_gsi_base); /* GIC ITS Base */
 
     fix_checksum(p, len);
     return len;

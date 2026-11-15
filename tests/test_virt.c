@@ -34,6 +34,35 @@ static void wr(HvMachine *m, uint64_t pa, uint64_t v, unsigned size) {
 
 static void sel(HvMachine *m, uint16_t s) { wr(m, VIRT_FW_CFG + 8, ((uint64_t)(s & 0xff) << 8) | (s >> 8), 2); }
 
+/* Read a whole fw_cfg file by name, the way the firmware does: walk FILE_DIR,
+   then select the entry and read its bytes one at a time. Returns the length,
+   or 0. */
+static uint64_t fw_file(HvMachine *m, const char *name, uint8_t *buf, uint64_t cap) {
+    sel(m, HV_FWCFG_FILE_DIR);
+    uint32_t count = 0;
+    for (int i = 0; i < 4; i++) count = (count << 8) | (uint8_t)rd(m, VIRT_FW_CFG, 1);
+    for (uint32_t i = 0; i < count && i < 64; i++) {
+        uint8_t ent[64];
+        for (int j = 0; j < 64; j++) ent[j] = (uint8_t)rd(m, VIRT_FW_CFG, 1);
+        uint32_t size = ((uint32_t)ent[0] << 24) | ((uint32_t)ent[1] << 16) | ((uint32_t)ent[2] << 8) | ent[3];
+        uint16_t s = (uint16_t)((ent[4] << 8) | ent[5]);
+        if (strncmp((const char *)ent + 8, name, HV_FWCFG_NAME)) continue;
+        sel(m, s);
+        uint64_t n = size < cap ? size : cap;
+        for (uint64_t k = 0; k < size; k++) {
+            uint8_t b = (uint8_t)rd(m, VIRT_FW_CFG, 1);
+            if (k < n) buf[k] = b;
+        }
+        return size;
+    }
+    return 0;
+}
+
+static uint32_t be32r(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+static uint64_t be64r(const uint8_t *p) { return ((uint64_t)be32r(p) << 32) | be32r(p + 4); }
+
 int main(void) {
     HvMachine *m = calloc(1, sizeof *m);
     if (hv_machine_init(m, 8u << 20) != 0) return 1;
@@ -148,7 +177,7 @@ int main(void) {
     fclose(f);
     int ok = hv_virt_create(&v, m3, cpus, 4, 512u << 20, "/tmp/vt_code2.bin", "/tmp/vt_vars2.bin");
     CHECK(ok == 0, "virt create (%d)", ok);
-    CHECK(m3->nram >= 1 && m3->main_ram->pa == VIRT_RAM_BASE, "guest RAM at %llx",
+    CHECK(m3->nram >= 1 && m3->ram[0].pa == VIRT_RAM_BASE, "guest RAM at %llx",
           (unsigned long long)(m3->main_ram ? m3->main_ram->pa : 0));
     hv_virt_reset_cpu(&v);
     CHECK(cpus[0].pc == 0x0, "cpu0 PC at the flash entry, got %llx", (unsigned long long)cpus[0].pc);
@@ -180,6 +209,126 @@ int main(void) {
     unlink("/tmp/vt_vars2.bin");
     hv_machine_free(m);
     free(m);
+
+
+    /* --- RAM above 4 GiB, with the ACPI window held out ---
+       A 512 MiB guest does not reach the tables; a 2 GiB one does, and must
+       continue above them rather than through them. */
+    {
+        HvMachine *m4 = calloc(1, sizeof *m4);
+        if (hv_machine_init(m4, 8u << 20) != 0) return 1;
+        HvCpu c4[4];
+        HvVirt v4;
+        memset(&v4, 0, sizeof v4);
+        /* A 1 MiB image, so the PCI side has a device to enumerate. */
+        {
+            FILE *img = fopen("/tmp/vt_disk.bin", "wb");
+            fseek(img, (long)(1u << 20) - 1, SEEK_SET);
+            fputc(0, img);
+            fclose(img);
+        }
+        v4.disk_path = "/tmp/vt_disk.bin";
+        FILE *g2 = fopen("/tmp/vt_code3.bin", "wb");
+        fputc(0x00, g2);
+        fclose(g2);
+        g2 = fopen("/tmp/vt_vars3.bin", "wb");
+        fputc(0xff, g2);
+        fclose(g2);
+        int ok4 = hv_virt_create(&v4, m4, c4, 4, 2ull << 30, "/tmp/vt_code3.bin", "/tmp/vt_vars3.bin");
+        CHECK(ok4 == 0, "virt create with 2 GiB (%d)", ok4);
+        HvRam *lo = hv_ram_lookup(m4, VIRT_RAM_BASE);
+        HvRam *hi = hv_ram_lookup(m4, VIRT_RAM_HIGH);
+        CHECK(lo && lo->size == VIRT_ACPI_BASE - VIRT_RAM_BASE, "low RAM stops at the ACPI window");
+        CHECK(lo && lo->pa + lo->size == VIRT_ACPI_BASE, "low RAM end");
+        {
+            HvRam *at = hv_ram_lookup(m4, VIRT_ACPI_BASE);
+            CHECK(at == NULL || at->pa != VIRT_ACPI_BASE, "no RAM starts at 0x48000000");
+        }
+        CHECK(hi && hi->pa == VIRT_RAM_HIGH, "high RAM at 4 GiB");
+        CHECK(hi && lo && lo->size + hi->size == (2ull << 30), "the two halves are the whole guest RAM");
+
+        /* The tables the firmware will read, fetched as it fetches them. */
+        uint8_t rsdp[64], madt[512], fadt[512], iort[512], xsdt[256], mcfg[128];
+        uint64_t rlen = fw_file(m4, "etc/acpi/rsdp", rsdp, sizeof rsdp);
+        CHECK(rlen == 36, "rsdp entry length %llu", (unsigned long long)rlen);
+        CHECK(memcmp(rsdp, "RSD PTR ", 8) == 0, "rsdp signature");
+        CHECK(be64r(rsdp + 24) == VIRT_ACPI_BASE + v4.acpi.off_xsdt, "rsdp -> xsdt");
+        uint64_t xlen = fw_file(m4, "etc/acpi/xsdt", xsdt, sizeof xsdt);
+        CHECK(xlen >= 36 + 8 * 8, "xsdt holds every table");
+        CHECK(memcmp(xsdt, "XSDT", 4) == 0, "xsdt signature");
+
+        uint64_t flen = fw_file(m4, "etc/acpi/facp", fadt, sizeof fadt);
+        CHECK(flen == 276, "fadt length %llu", (unsigned long long)flen);
+        CHECK(be32r(fadt + 36 + 80) & (1u << 20), "HW_REDUCED_ACPI");
+        CHECK(((fadt[36 + 109] << 8) | fadt[36 + 110]) == 0x5, "PSCI via HVC only, got %#x",
+              (fadt[36 + 109] << 8) | fadt[36 + 110]);
+
+        uint64_t alen = fw_file(m4, "etc/acpi/apic", madt, sizeof madt);
+        CHECK(alen == 44 + 4 * 80 + 24 + 24 + 20, "madt length %llu", (unsigned long long)alen);
+        /* every CPU has a GICC that names its own redistributor frame */
+        int gicc = 0, its_found = 0;
+        for (uint32_t o = 44; o + 2 <= alen;) {
+            uint8_t type = madt[o], len = madt[o + 1];
+            if (len < 2) break;
+            if (type == 0x0b && len == 80) {
+                CHECK(be64r(madt + o + 60) == VIRT_GIC_REDIST + (uint64_t)gicc * 0x20000ull, "gicc %d GICR", gicc);
+                CHECK(be32r(madt + o + 8) == (uint32_t)gicc, "gicc %d UID", gicc);
+                gicc++;
+            }
+            if (type == 0x0f) {
+                its_found = 1;
+                CHECK(len == 20, "ITS structure length %u", len);
+                CHECK(be32r(madt + o + 4) == VIRT_GIC_ITS_ID, "ITS id");
+                CHECK(be64r(madt + o + 8) == VIRT_GIC_ITS, "ITS address");
+                CHECK(be32r(madt + o + 16) == VIRT_GIC_LPI_BASE, "ITS GSI base");
+            }
+            o += len;
+        }
+        CHECK(gicc == 4, "one GICC per CPU (%d)", gicc);
+        CHECK(its_found, "MADT names the ITS");
+
+        uint64_t ilen = fw_file(m4, "etc/acpi/iort", iort, sizeof iort);
+        CHECK(ilen >= 48 && memcmp(iort, "IORT", 4) == 0, "iort (%llu)", (unsigned long long)ilen);
+        uint64_t mlen = fw_file(m4, "etc/acpi/mcfg", mcfg, sizeof mcfg);
+        CHECK(mlen >= 60 && memcmp(mcfg, "MCFG", 4) == 0, "mcfg");
+        CHECK(be64r(mcfg + 44) == VIRT_PCIE_ECAM, "mcfg ECAM base");
+
+        /* Two devices on the bridge, both modern virtio 1.0 and both with MSI-X,
+           which is the only interrupt transport Windows' virtio drivers take.
+           Read them out of configuration space as the firmware would. */
+        HvPciDev *fn1 = NULL, *fn2 = NULL;
+        int ndev = 0;
+        for (int i = 0; i < HV_PCI_MAX_DEV; i++) {
+            /* s->pcie.dev[] also holds the host bridge itself: skip it (dev 0). */
+            if (!v4.pci->dev[i] || (i >> 3) == 0) continue;
+            if (!fn1) fn1 = v4.pci->dev[i];
+            else if (!fn2) fn2 = v4.pci->dev[i];
+            ndev++;
+        }
+        CHECK(ndev == 2, "two functions on the bridge (%d)", ndev);
+        if (fn1 && fn2) {
+            uint16_t ven1 = (uint16_t)(fn1->config[0] | (fn1->config[1] << 8));
+            uint16_t dev1 = (uint16_t)(fn1->config[2] | (fn1->config[3] << 8));
+            uint16_t ven2 = (uint16_t)(fn2->config[0] | (fn2->config[1] << 8));
+            uint16_t dev2 = (uint16_t)(fn2->config[2] | (fn2->config[3] << 8));
+            CHECK(ven1 == 0x1af4 && dev1 == 0x1042, "virtio-blk at dev1: %04x:%04x", ven1, dev1);
+            CHECK(ven2 == 0x1af4 && dev2 == 0x1041, "virtio-net at dev2: %04x:%04x", ven2, dev2);
+            int msix = 0;
+            for (uint8_t c = fn1->config[0x34]; c && c < 0x100; c = fn1->config[c + 1])
+                if ((fn1->config[c] & 0x7f) == 0x11) msix = 1;
+            CHECK(msix, "virtio-blk advertises MSI-X");
+            CHECK(fn1->msix_vectors >= 2 && fn2->msix_vectors >= 2, "a vector per queue");
+        }
+        CHECK(v4.net != NULL, "the NIC exists");
+        CHECK(v4.blk != NULL, "the disk was attached");
+        if (v4.blk) CHECK((v4.blk->vio.config[0] | (v4.blk->vio.config[1] << 8)) == 2048, "capacity in 512-byte sectors");
+        hv_virt_destroy(&v4);
+        hv_machine_free(m4);
+        free(m4);
+        unlink("/tmp/vt_code3.bin");
+        unlink("/tmp/vt_vars3.bin");
+        unlink("/tmp/vt_disk.bin");
+    }
 
     printf("%d checks, %d failures\n", checks, fails);
     return fails != 0;

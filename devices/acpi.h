@@ -57,6 +57,8 @@ typedef struct HvAcpiParams {
     uint64_t gic_dist;
     uint64_t gic_redist;
     uint64_t gic_its;
+    uint32_t gic_its_id;     /* the ITS's own ID: IORT names it, and must name a real one */
+    uint32_t gic_its_gsi_base; /* MADT's GIC ITS "GIC ITS Base": this is where Windows puts its LPIs */
     uint64_t uart;
     uint64_t ecam;
     uint64_t ecam_size;
@@ -64,6 +66,10 @@ typedef struct HvAcpiParams {
     uint32_t pci_bus_max;
     uint32_t counter_hz;
     int ncpus;
+    /* PSCI conduit. FADT 5.2.9 wants this to follow the DT's /psci, which is hvc
+       here because there is no EL3 to trap smc. Both are filled in. */
+    uint8_t psci_conduit;   /* 2: hvc, 3: smc */
+    uint8_t psci_version;   /* minor; major is always 0 in this field */
 } HvAcpiParams;
 
 int hv_acpi_build(uint8_t *buf, size_t buf_size, const HvAcpiParams *p, HvAcpi *out);

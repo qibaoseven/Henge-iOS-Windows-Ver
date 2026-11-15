@@ -80,10 +80,14 @@ int main(int argc, char **argv)
     pr.pci_bus_min = 0;
     pr.pci_bus_max = 15;
     pr.counter_hz = 62500000u;
+    pr.gic_its_id = 0;
+    pr.gic_its_gsi_base = 8192;
+    pr.psci_conduit = 2;
+    pr.psci_version = 2;
     pr.ncpus = 2;
 
     uint8_t *blob = malloc(ACPI_MAX_SIZE);
-    HvAcpi a;
+    HvAcpi a, c;
     if (!blob) return 2;
 
     CHECK(hv_acpi_build(blob, ACPI_MAX_SIZE, &pr, &a) == 0);
@@ -132,8 +136,8 @@ int main(int argc, char **argv)
     CHECK(be32(fadt + 36 + 4) == (uint32_t)(ACPI_PHYS_BASE + a.off_dsdt));
     CHECK(be64(fadt + 36 + 120) == ACPI_PHYS_BASE + a.off_dsdt);
     CHECK(be32(fadt + 36 + 80) & (1u << 20));       /* HW_REDUCED_ACPI */
-    CHECK(be16(fadt + 36 + 109) == 0x3);            /* PSCI + HVC */
-    CHECK(fadt[36 + 111] == 3);                     /* minor version */
+    CHECK(be16(fadt + 36 + 109) == 0x5);            /* PSCI + HVC, and not smc */
+    CHECK(fadt[36 + 111] == 2);                    /* MINOR_VERSION: PSCI 0.2 */
 
     /* ---- APIC: one GICC per CPU, GICD, GICR, ITS ---- */
     const uint8_t *madt = blob + a.off_madt;
@@ -152,8 +156,24 @@ int main(int argc, char **argv)
             CHECK(be64(madt + o + 60) == pr.gic_redist + (uint64_t)(gicc - 1) * 0x20000ull);
         }
         if (type == 0x0c) { gicd++; CHECK(be64(madt + o + 8) == pr.gic_dist); }
-        if (type == 0x0e) { gicr++; CHECK(be64(madt + o + 4) == pr.gic_redist); }
-        if (type == 0x0f) { its++; its_node = madt + o; CHECK(len == 20); }
+        if (type == 0x0e) {
+            gicr++;
+            CHECK(len == 24);
+            CHECK(be32(madt + o + 4) == 0);
+            CHECK(be64(madt + o + 12) == pr.gic_redist); /* GICR base */
+            /* What a real Linux/Windows reader checks: the frame listed for each
+               CPU lies inside the range the GICR structure describes. */
+            CHECK(be64(madt + o + 12) <= pr.gic_redist &&
+                  be64(madt + o + 12) + be32(madt + o + 20) >= pr.gic_redist + (uint64_t)pr.ncpus * 0x20000ull);
+            CHECK(be32(madt + o + 20) == (uint32_t)pr.ncpus * 0x20000u); /* range length */
+        }
+        if (type == 0x0f) {
+            its++;
+            its_node = madt + o;
+            CHECK(len == 20);
+            CHECK(be32(madt + o + 4) == pr.gic_its_id);
+            CHECK(be32(madt + o + 16) == pr.gic_its_gsi_base);
+        }
         o += len;
     }
     CHECK(gicc == pr.ncpus);

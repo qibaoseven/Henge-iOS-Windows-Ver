@@ -6,7 +6,8 @@
  * an empty screen.
  *
  *   hv_uefi --code edk2-aarch64-code.fd --vars edk2-arm-vars.fd [--ram 512]
- *           [--cpus 4] [--save-vars out.fd] [--verbose]
+ *           [--cpus 4] [--disk windows.img] [--disk-ro] [--save-vars out.fd]
+ *           [--verbose]
  */
 #include <getopt.h>
 #include <stdio.h>
@@ -30,22 +31,27 @@ static void serial_out(void *opaque, uint8_t c) {
 
 int main(int argc, char **argv) {
     const char *code = "firmware/edk2-aarch64-code.fd", *vars = "firmware/edk2-arm-vars.fd";
-    const char *save_vars = NULL;
+    const char *save_vars = NULL, *disk = NULL;
+    int disk_ro = 0;
     int ram_mb = 512, ncpus = 4, verbose = 0;
     static struct option opts[] = {{"code", required_argument, 0, 'c'},
                                    {"vars", required_argument, 0, 'v'},
                                    {"ram", required_argument, 0, 'r'},
                                    {"cpus", required_argument, 0, 'n'},
+                                   {"disk", required_argument, 0, 'd'},
+                                   {"disk-ro", no_argument, 0, 'D'},
                                    {"save-vars", required_argument, 0, 's'},
                                    {"verbose", no_argument, 0, 'V'},
                                    {0, 0, 0, 0}};
     int o;
-    while ((o = getopt_long(argc, argv, "c:v:r:n:s:V", opts, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV", opts, NULL)) != -1) {
         switch (o) {
         case 'c': code = optarg; break;
         case 'v': vars = optarg; break;
         case 'r': ram_mb = atoi(optarg); break;
         case 'n': ncpus = atoi(optarg); break;
+        case 'd': disk = optarg; break;
+        case 'D': disk_ro = 1; break;
         case 's': save_vars = optarg; break;
         case 'V': verbose = 1; break;
         default: return 2;
@@ -67,6 +73,9 @@ int main(int argc, char **argv) {
 
     HvCpu *cpus = calloc((size_t)ncpus, sizeof *cpus);
     HvVirt b;
+    memset(&b, 0, sizeof b);
+    b.disk_path = disk; /* hv_virt_create keeps these two before it clears the rest */
+    b.disk_ro = disk_ro;
     if (hv_virt_create(&b, m, cpus, ncpus, (uint64_t)ram_mb << 20, code, vars) != 0) {
         fprintf(stderr, "hv_uefi: cannot build the machine (firmware, memory or a window refused)\n");
         return 4;
@@ -83,6 +92,20 @@ int main(int argc, char **argv) {
             (unsigned long long)cpus[0].pc, (unsigned long long)cpus[0].x[0], (unsigned long long)b.dtb_len, code,
             vars, ncpus, ram_mb, (unsigned long long)VIRT_GUEST_RAM, (unsigned long long)VIRT_GIC_DIST,
             (unsigned long long)VIRT_UART0, (unsigned long long)VIRT_FW_CFG);
+    fprintf(stderr,
+            "hv_uefi: ACPI %u bytes at %#llx via fw_cfg (RSDP %#llx, FADT %#llx, DSDT %#llx,"
+            " MADT %#llx, GTDT %#llx, MCFG %#llx, IORT %#llx, SPCR %#llx)\n"
+            "hv_uefi: %d PCIe function(s): virtio-blk %s, virtio-net\n",
+            b.acpi_bytes, (unsigned long long)VIRT_ACPI_BASE,
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_rsdp),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_fadt),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_dsdt),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_madt),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_gtdt),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_mcfg),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_iort),
+            (unsigned long long)(VIRT_ACPI_BASE + b.acpi.off_spcr), b.blk ? 2 : 1,
+            b.blk ? (disk_ro ? "read-only" : "read-write") : "absent");
 
     if (!have_jit) {
         fprintf(stderr,

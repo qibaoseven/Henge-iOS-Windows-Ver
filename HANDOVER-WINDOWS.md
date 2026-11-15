@@ -15,12 +15,12 @@
 
 | 项 | 值 |
 |---|---|
-| 代码根目录 | `/root/henge_extract/Henge-main` |
-| Git | 11 个提交，**无远程**，工作区干净 |
+| 代码根目录 | `/root/Henge-main`（早期副本 `/root/henge_extract/Henge-main` 不存在） |
+| Git | 14 个提交，**无远程** |
 | 基线提交 | `7635f0e Import Henge upstream (baseline, unmodified)` |
-| 当前 HEAD | `1d6978e` |
-| 构建 | `sh compat/build-and-test.sh` |
-| 测试 | 117 / 62 / 26 / 34，全 0 failures |
+| 当前 HEAD | 见 `git log --oneline -1` |
+| 构建 | `sh compat/build-and-test.sh`（**不要 `make`**） |
+| 测试 | 117 / 102 / 26 / 34 / 139，全 0 failures + iasl 10 张表全 ok |
 
 ---
 
@@ -322,3 +322,91 @@ devices/virtio_usb.c .h  Apple USB 设备口
 devices/xhci.c .h        USB 控制器
 ios/Henge/BootROM.swift  AVPBooter 下载器
 ```
+
+---
+
+## 12. 进度盘点（2026-11-15 更新）：M2 还剩什么，M3 有什么
+
+### M2 — “Windows 安装器能认出 virtio-blk 并开始装”
+
+| # | 项 | 状态 |
+|---|---|---|
+| 1 | 4K TLB、virt 平台地基、DTB、ITS+MSI-X、PCIe 多 bus | ✅ 已完成 |
+| 2 | ACPI 表（RSDP/RSDT/XSDT/FADT/DSDT/MADT/GTDT/MCFG/SPCR/IORT/PPTT） | ✅ 已完成（`devices/acpi.c`，139 checks + iasl） |
+| 3 | 把表交给客户机（fw_cfg `etc/acpi/*` + 固定物理地址 `0x4800_0000`） | ✅ 已完成（`virt.c`） |
+| 4 | RAM 让出 ACPI 窗口，>4 GiB 时续到 `0x1_0000_0000` | ✅ 已完成 |
+| 5 | virtio-blk / virtio-net 实例挂到总线上（MSI-X、BAR、devfn） | ✅ 已完成 |
+| 6 | `main_uefi` 打印 ACPI 表地址与设备清单 | ✅ 已完成 |
+| 7 | **真实 AAVMF 跑一遍，确认它读的是 ACPI 不是 DT** | ⬜ 待做（用户要求本轮不冒烟） |
+| 8 | Windows 11 ARM64 ISO 首次安装冒烟 | ⬜ 待做 |
+| 9 | virtio-blk 的 UEFI 侧（纯 MSI-X 无 INTx，UEFI 的 virtio 驱动要轮询） | ⚠️ 观察点，冒烟时最先看 |
+| 10 | DSDT 还缺 `\_SB.PCI0` 下的设备子节点、CPU 容器（见 §13） | ⚠️ 已知不完整 |
+
+### M3 — “装完能开机、能上网、能看见画面”
+
+| # | 项 | 说明 |
+|---|---|---|
+| 1 | **虚拟磁盘** | 目前只有 raw 单文件（`hv_disk_open`）。qcow2 / 稀疏镜像 / 快照没有。安装至少要 16 GiB 的 raw 或稀疏文件 |
+| 2 | **引导顺序 / BDS** | Windows 安装完成后要能从硬盘启动：需要 boot order、`Boot####` 变量、`BootNext` 语义；现在全靠固件默认 |
+| 3 | **RTC 与时钟** | PL031 的秒计数要跟真实时间对齐，Windows 会拿它当系统时钟；还要 ACPI 的 `\_SB.PCI0` 之外的时间源（`FADT` 的 PM Timer 在 HW-reduced 下没有） |
+| 4 | **网络后端** | `virtio-net` 只有钩子（`transmit` / `hv_virtio_net_receive`）。`host/net_slirp.c` 是现成的 slirp 后端，但要接线、要 ARP/DHCP 通路 |
+| 5 | **显示与输入** | 三条候选：① 串口安装（最省事）② `virtio-gpu` 2D（`pvg_lite.c` 的 display 出口可借鉴）③ ramfb 最简单的 2D framebuffer。输入走 `virtio-input`（`devices/virtio_input.c` 已有骨架） |
+| 6 | **Windows 特有**：TPM、Secure Boot、驱动签名 | Windows 11 装机会查 TPM 2.0 / Secure Boot。可以改注册表绕过，也可以以后补 vTPM |
+| 7 | **SMP 稳定性** | 多核 PSCI CPU_ON 已通，但 Windows 的 IPI / 时钟事件压力远大于 UEFI |
+| 8 | 性能 | 无 JIT 优化前能装就不错了；之后是块缓存、TLB |
+
+### M2 明确不做的（别再提案）
+
+- fw_cfg DMA / `etc/table-loader`（user 拍板）
+- 手写固定字节数组的 ACPI、移植完整 ACPICA（用 `acpi.c` 的 emitter）
+- INTx 中断（现代 virtio 只用 MSI-X）
+- macOS guest 回归验证
+
+---
+
+## 13. “ACPI 表要哪些东西” —— 完整性核对
+
+**ACPICA 的硬性要求只有一条**：`tbxfload.c` 里写着 “The DSDT is required, but any SSDT
+and PSDT tables are optional”，`FACS` 缺失只报 warning（`tbutils.c`）。所以**从“能启动”
+的角度，RSDP + XSDT + FADT + DSDT 就是最小集**。
+
+但“能启动”和“能装 Windows”是两回事。下面是 **QEMU `hw/arm/virt-acpi-build.c` 为
+Windows ARM64 生成的全集**（也是我们对照的基准），以及我们的实现状态：
+
+| 表 | ACPI 规范里的地位 | 我们 | 关键点 |
+|---|---|---|---|
+| RSDP | 根指针，必须 | ✅ | 前 20 字节 + 扩展 16 字节各一个校验和 |
+| RSDT | ACPI 1.0 读取器用 | ✅ | 8 个 32 位指针 |
+| XSDT | ACPI 2.0+，必须 | ✅ | 8 个 64 位指针 |
+| FACP (FADT) | 必须 | ✅ | **PSCI conduit 只有 HVC（0x5）**；`HW_REDUCED_ACPI`；X_DSDT |
+| DSDT | **必须**（ACPICA 明说） | ✅ 但很薄 | 只有 `\_SB.PCI0`（`_HID/_CID/_UID/_CRS/_DSM`） |
+| APIC (MADT) | ARM64 有 GIC 就必须 | ✅ | 每 CPU 一个 GICC（含自己的 GICR 帧）+ GICD + GICR + ITS（**含 GIC ITS Base**） |
+| GTDT | ARM64 必须 | ✅ | 非安全 EL1 定时器 GSIV 30、计数频率 62.5 MHz |
+| MCFG | 有 PCIe 就必须 | ✅ | ECAM `0x3F00_0000`，16 条总线 |
+| IORT | 有 ITS+PCIe 就必须 | ✅ | RC → ITS 组，RID 0..0xFFFF 直连 |
+| SPCR | 有串口控制台就必须 | ✅ | PL011 `0x0900_0000`，16550 子类型 |
+| PPTT | 可选（Linux 用） | ✅ | CPU 拓扑，Windows 不读 |
+| **FACS** | 可选 | ❌ | HW-reduced 可以没有；有的固件会去找 |
+| **BERT / EINJ / ERST / HEST** | 可选（错误记录） | ❌ | Windows 不要 |
+| **SRAT / SLIT** | NUMA，可选 | ❌ | 单节点不需要 |
+| **DBG2** | 调试串口描述，可选 | ❌ | Windows 的调试串口要它，但装机能不用 |
+| **BGRT** | 启动 logo，可选 | ❌ | 纯装饰 |
+| **MCHI** | 管理控制器，可选 | ❌ | 不要 |
+| **IIO / SRAT for PCI** | 可选 | ❌ | 不要 |
+| **CSRT / DRTM / TPM2** | 可选 | ❌ | Windows 11 会查 TPM，但可以从注册表绕过 |
+
+### 我们 DSDT 里缺的东西（“不完整”的真实含义）
+
+1. **没有 CPU 设备节点**（`_SB.CP00..CPnn`，`_HID = ACPI0007`）。Linux 从 MADT 认 CPU，
+   Windows 也从 MADT 认，但 `_PXM` / `_STA` 之类的 NUMA 与热插拔钩子在这里没有。
+2. **`\_SB.PCI0` 下没有子设备**。Windows 靠 PCI 枚举 + `_CRS` 找设备，子节点不是必须的，
+   但 QEMU 会为 `virtio-blk` 写一个 `_DSD`。**决定性的是 `_CRS` 要写全**：
+   ECAM (`0x3F00_0000`, 16 MB) **+ MMIO (`0x1000_0000`, `0x2EFF_0000`) + PIO (`0x3EFF_0000`)**。
+   现在 `_CRS` 只有 ECAM 一段 —— 这是最该补的一处。
+3. **缺 `_OSC`**（操作系统能力协商）。Windows 的 PCI 驱动会调 `\_SB.PCI0._OSC`；
+   不实现它也能枚举，但 QEMU 是实现的，Windows 的 ACPI 驱动会记一条 “_OSC not found”。
+4. **没有 SSDT**。QEMU 的 x86 会把热插拔/CPU 表拆到 SSDT；ARM virt 不需要，我们也就不做。
+
+> 结论：**“启动最小集”我们已经超了**（多做了 MCFG/IORT/SPCR/PPTT）；
+> 真正缺的是 **DSDT 的内容深度**，尤其是 `_CRS` 的完整窗口与 `_OSC`。
+
