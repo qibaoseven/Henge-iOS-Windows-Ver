@@ -28,7 +28,7 @@ for f in classify operands translate dispatch memop exception sysreg machine; do
 done
 # The virt machine's pieces, which the Windows direction needs and which build
 # without a JIT: their test drives the device callbacks through the MMIO map.
-for f in pflash fw_cfg virt dtb its gicv3 pl011 pl031 pl061 pcie virtio timer; do
+for f in pflash fw_cfg virt dtb its gicv3 pl011 pl031 pl061 pcie virtio timer acpi; do
     $CC $CFLAGS -Idevices -c "devices/$f.c" -o "$OUT/dev_$f.o"
 done
 # mmu.c must not use SIMD: hv_tlb_refill runs with the guest's vectors live.
@@ -67,6 +67,21 @@ $CC $CFLAGS -Idevices tests/test_pcie.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/t
 echo "== test_dtb"
 $CC $CFLAGS -Idevices tests/test_dtb.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_dtb"
 "$OUT/test_dtb"
+
+echo "== test_acpi"
+mkdir -p "$OUT/acpi"
+$CC $CFLAGS -Idevices tests/test_acpi.c "$OUT/dev_acpi.o" -o "$OUT/test_acpi"
+"$OUT/test_acpi" "$OUT/acpi"
+# Check what it produced with an independent implementation. iasl comes from
+# ACPICA, so a table it rejects is a table Windows would reject too -- except
+# that this host's iasl reads the length field little-endian; compat/acpi-check.py
+# verifies the bytes itself first and feeds iasl a swapped copy.
+if command -v iasl >/dev/null 2>&1; then
+    echo "== acpi-check.py (iasl)"
+    python3 compat/acpi-check.py "$OUT/acpi" || exit 1
+else
+    echo "== iasl not installed: apk add acpica to check the tables"
+fi
 
 cat <<'EOF'
 
