@@ -6,15 +6,32 @@ B = build
 CORE = $(B)/classify.o $(B)/operands.o $(B)/translate.o $(B)/dispatch.o $(B)/mmu.o $(B)/memop.o \
        $(B)/exception.o $(B)/sysreg.o $(B)/machine.o
 HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
-DEV = $(B)/pvg_lite.o $(B)/pvg_metal.o $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/cfg.o $(B)/bdif.o $(B)/pcie.o \
-      $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o $(B)/virtio_usb.o $(B)/virtio_balloon.o $(B)/xhci.o $(B)/vmapple.o $(B)/aes.o $(B)/pl061.o $(B)/acpi.o $(B)/metallib.o
+# The Windows-ARM64 machine's devices. `f81479e` replaced the old virt machine
+# (devices/virt.c, dtb.c, its.c) with winvirt.c / fdt.c and merged ITS into
+# gicv3.c; the object list follows the sources that exist now.
+WINDEV = $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/pl061.o $(B)/pcie.o \
+         $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o \
+         $(B)/xhci.o $(B)/acpi.o $(B)/nvme.o $(B)/hda.o $(B)/fdt.o $(B)/fw_cfg.o $(B)/pflash.o \
+         $(B)/winvirt.o $(B)/fb_display.o
+# The macOS guest build ("Henge" the app) still ships the Apple GPU path, which
+# the Windows direction does not use.
+DEV = $(WINDEV) $(B)/pvg_metal.o $(B)/pvg_mac.o
 ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
         $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown
 
-all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
+# `hengevm` / `hengevm-ref` were the macOS-guest binaries (host/main.c, vm.c,
+# hvf_ref.c); those sources went away with the Windows direction, so they are
+# no longer part of `all`. The Windows runner is host/main_mac.m (target `winvm`)
+# and the UEFI smoke runner is the `hv_uefi` target below.
+all: $(TESTS) $(B)/hv_uefi $(B)/hvsparse
+
+# UEFI smoke runner: the Windows machine, its firmware, and its serial port.
+# Needs an arm64 host (the engine's JIT translates arm64; x86 cannot build core/).
+$(B)/hv_uefi: host/main_uefi.c $(ENGINE) $(WINDEV)
+	$(CC) $(CFLAGS) host/main_uefi.c $(ENGINE) $(WINDEV) -latomic -lpthread -o $@
 
 # Mac-only test tool: the same machine with the CPU on Hypervisor.framework, for comparing runs.
 $(B)/hengevm-ref: host/hvf_ref.c host/hvf_ref.entitlements $(ENGINE) $(DEV)
@@ -132,7 +149,11 @@ IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isy
 IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/deps,$(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot)
 IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
 IB = build/ios
-IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/vm.c host/net_slirp.c host/dns_proxy.c host/share.c host/audio_mac.c host/hvsparse.c host/usb_host.c \
+# host/vm.c, dns_proxy.c and usb_host.c went away with the Windows direction;
+# the Windows runner is host/winvm.c. The iOS front end (ios/Henge/Native/
+# henge-vm.c) still speaks the macOS-guest API, so it is not listed here until
+# it is moved onto winvm -- see MILESTONES.md, section 4.
+IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/winvm.c host/net_slirp.c host/share.c host/audio_mac.c host/hvsparse.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o
 

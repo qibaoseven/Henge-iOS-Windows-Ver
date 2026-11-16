@@ -1,6 +1,6 @@
 #!/bin/sh
-# Boot the virt machine with an arm64 UEFI firmware, and print what its serial
-# port says.
+# Boot the Windows-ARM64 machine (devices/winvirt.c) with an arm64 UEFI
+# firmware, and print what its serial port says.
 #
 #   sh tools/run-uefi.sh [code.fd] [vars.fd] [ram_mb]
 #
@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 CODE=${1:-${EDK2_CODE:-firmware/edk2-aarch64-code.fd}}
 VARS=${2:-${EDK2_VARS:-firmware/edk2-arm-vars.fd}}
-RAM=${3:-${HV_RAM_MB:-512}}
+RAM=${3:-${HV_RAM_MB:-2048}}
 
 for f in "$CODE" "$VARS"; do
     if [ ! -f "$f" ]; then
@@ -38,8 +38,9 @@ OBJS=""
 needs_build=0
 [ -x "$BIN" ] || needs_build=1
 for f in core/classify core/operands core/translate core/dispatch core/memop core/exception core/sysreg core/machine \
-         devices/pflash devices/fw_cfg devices/virt devices/dtb devices/its devices/gicv3 devices/pl011 devices/pl031 \
-         devices/pl061 devices/pcie devices/virtio devices/virtio_blk devices/virtio_net devices/acpi devices/timer \
+         devices/winvirt devices/fdt devices/fw_cfg devices/pflash devices/gicv3 devices/pl011 devices/pl031 \
+         devices/pl061 devices/pcie devices/virtio devices/virtio_net devices/virtio_snd devices/virtio_blk \
+         devices/acpi devices/timer devices/nvme devices/hda devices/xhci devices/fb_display \
          host/disk host/jit_region host/main_uefi; do
     o=build/posix/vb_$(basename "$f").o
     OBJS="$OBJS $o"
