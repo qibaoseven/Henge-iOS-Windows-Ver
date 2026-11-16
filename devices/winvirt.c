@@ -253,3 +253,7 @@ int hv_winvirt_attach_cd(HvWinVirt *b, const char *iso_path) {
     if (!b || !b->usb) return -1;
     return hv_xhci_attach_cd(b->usb, iso_path);
 }
+
+void hv_winvirt_detach_cds(HvWinVirt *b) {
+    if (b && b->usb) hv_xhci_detach_cd(b->usb);
+}

@@ -91,6 +91,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
 /* Put an ISO on xHCI port 3 as a read-only CD-ROM (before the CPU starts).
    Call twice to attach two CDs (setup media + payload media). */
 int hv_winvirt_attach_cd(HvWinVirt *b, const char *iso_path);
+void hv_winvirt_detach_cds(HvWinVirt *b);
 void hv_winvirt_reset_cpu(HvWinVirt *b);
 void hv_winvirt_power_button(HvWinVirt *b);
 

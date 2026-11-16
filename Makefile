@@ -158,9 +158,9 @@ IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/dep
 IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
 IB = build/ios
 # host/vm.c, dns_proxy.c and usb_host.c went away with the Windows direction;
-# the Windows runner is host/winvm.c. The iOS front end (ios/Henge/Native/
-# henge-vm.c) still speaks the macOS-guest API, so it is not listed here until
-# it is moved onto winvm -- see MILESTONES.md, section 4.
+# the Windows runner is host/winvm.c, and the iOS front end for it is
+# ios/Henge/Native/henge-winvm.c (compiled by Xcode, next to the Swift sources).
+# henge-vm.c is the old macOS-guest bridge and is no longer part of this app.
 IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c host/winvm.c host/net_slirp.c host/share.c host/audio_mac.c host/hvsparse.c \
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o \

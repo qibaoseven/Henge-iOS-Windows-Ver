@@ -11,6 +11,7 @@ struct HomeView: View {
     @State private var picking = false
     @State private var jitReady = JITBootstrap.ready
     @State private var chosen: UUID?
+    @State private var showingWindows = false
 
     /// The Mac on show: the one picked, or the one used last.
     private var mac: VirtualMac? {
@@ -42,9 +43,11 @@ struct HomeView: View {
             .background(Desk.page)
             .navigationTitle("Henge")
             .navigationDestination(for: VirtualMac.self) { MacSettingsView(mac: $0) }
+            .navigationDestination(isPresented: $showingWindows) { WinHomeView() }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
+                        Button("Windows 虚拟机…") { showingWindows = true }
                         Button("Install macOS…") { tab = .install }
                         Button("Bring in a Mac from a computer…") { picking = true }
                     } label: {
