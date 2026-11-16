@@ -403,3 +403,27 @@ ISO9660 单文件 4 GB 上限——如果不拆，`install.esd`（4.5 GB）就�
 
 xHCI 改造是纯设备仿真，**这台 x86 主机跑不起来**（`core/translate.c` 有 aarch64 内联汇编），只能 `-fsyntax-only`；
 BOT 状态机和 SCSI 命令时序的正确性，只能靠真机 + PE 的实际行为来收敛。计划里要预留迭代轮次。
+
+### 14.6 更省的一招：只导出 Pro 单版
+
+多版 ESD 里绝大部分体积是其它 edition 的重复文件（Home / 教育版 …），只导出一个 edition 能砍掉不少。
+
+**硬条件：必须导成 solid LZMS，否则会超 4 GB。**
+
+```bash
+# 先看 index：Pro 是哪一号（24H2 ARM64 零售 ESD 通常是 6，别硬编码）
+wimlib-imagex info Win11_ARM64.esd
+
+# 只导 Pro，solid LZMS
+wimlib-imagex export Win11_ARM64.esd <Pro的index> install.esd \
+    --compress=LZMS --solid --chunk-size=128MiB
+
+ls -l install.esd     # ← 用这个数字决定后面走哪条
+```
+
+| 导出后大小 | 走哪条 | 设备工作 |
+|---|---|---|
+| **< 4 GB** | payload 放 **FAT32 盘**，当普通 NVMe 挂（PE 的 FAT 驱动直接读） | **连 USB CD-ROM 都不用给 payload**，只剩 PE 引导这一件事 |
+| ≥ 4 GB | 拆 `install.swm` / `install1.swm` 打进 ISO | 需要 USB CD-ROM |
+
+注意：`--compress=LZX` 导出来的单版通常 4.5–5 GB，会超；**只有 solid LZMS 才有机会压到 4 GB 以下**，而且导出过程在 iPad 上可能跑 20–60 分钟（CPU 密集），要看实测数字，不能拍脑袋。
