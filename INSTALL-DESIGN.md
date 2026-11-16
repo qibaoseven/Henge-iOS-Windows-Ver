@@ -31,7 +31,7 @@
 | 系统盘 | 稀疏镜像，默认 **32 GB**（页 2 的输入框） |
 | 设备 | NVMe（系统盘）、xHCI（键鼠）、ramfb **+ virtio-gpu（新）**、HDA、virtio-net |
 | 没有 | 无 hypervisor、无 EL2（无 Hyper-V/WSL2/VBS）、**无 TPM**、无 AArch32 |
-| 用户要准备 | **2 个文件**：Win11 ARM64 ESD、WinPE（ARM64） |
+| 用户要准备 | **0 个文件、0 步操作**（v3 起 App 内下载/自解，见 §13） |
 
 ---
 
@@ -40,7 +40,7 @@
 | # | 页面 | 改法 |
 |---|---|---|
 | 1 | 首页 | 保留；入口改 "Install Windows 11"，列表加状态徽标 |
-| 2 | **安装页** | **整体重写**：一个"分配空间"输入框（默认 32 GB）+ 一个大按钮"开始安装"；下面是**两份文件**的准备清单（原来三份，virtio 那份删掉——现在是内置的） |
+| 2 | **安装页** | **整体重写**：一个"分配空间"输入框（默认 32 GB）+ 一个大按钮"开始安装"；下面只有一行状态（"正在准备安装介质 / 正在安装 Windows / 正在首次开机"），**不再要用户选文件**（见 §13） |
 | 3 | 设置页 | 保留改动：内存默认 6 GB（4–10）、CPU 4、分辨率跟随设备；新增"驱动"分组（显示"已内置：显示 2D / 网卡 / 证书"，不可选）；macOS 专属项隐藏 |
 | 4 | 会话页 | 保留改动：触屏 = 绝对定位鼠标、底部虚拟键盘、右上角阶段；阶段 2 常驻操作卡片 |
 
@@ -277,3 +277,85 @@ FAT32 扁平镜像挂到 NVMe 后，BDS 直接当可启动盘，零风险。
 - 8 GB 内存需要 **Increased Memory Limit** 能力，否则自动降到 4–5 GB，3D 可能加载失败。
 - 开 3D 后可能黑屏 → 用 `Shared/gpu3d.on` 开关回退到基本显示；**不要禁用 Microsoft Basic Display Driver**。
 - Windows 自带"重启"偶发卡黑屏，关机正常。
+
+---
+
+## 13. v3：零电脑、零文件、零操作（这是本项目的立项理由）
+
+> Apple VM 的做法不适用：它必须先在 Mac 上跑一遍模拟器把镜像装出来（它自己承认"制作这一步不行"）。
+> 本项目存在的前提就是**用户没有电脑**，所以安装的**每一个字节都必须在设备上生成**。
+
+### 13.1 连带结论：WinPE 也不能让用户准备
+
+既然没有电脑，"让用户自己去弄一个 ARM64 WinPE 镜像"就不成立 —— 微软不单独分发 WinPE，
+第三方 PE 几乎全是 x86，ARM64 的极难找。所以：
+
+| 东西 | v2 的假设 | v3 必须 |
+|---|---|---|
+| Windows 安装源（ESD） | 用户下载后拷进手机 | App 内下载（解析微软 products.xml）或用户选本地 ESD，二选一 |
+| **WinPE** | 用户提供 FAT32 镜像 | **App 从 ESD 自己解出来**（ESD 的第 2 个映像就是 WinPE） |
+| 驱动 | 内置 | 内置（不变） |
+
+最终形态：**用户点一次"开始安装"，然后看进度。0 文件、0 操作。**
+
+### 13.2 设备内全自动安装的流水线
+
+```
+点"开始安装"
+  ↓
+[准备介质]（设备上，纯本地）
+  1. 取 ESD
+     - 路径 A：App 内下载（go.microsoft fwlink 2156292 → products.cab → products.xml → 筛 ARM64/en-us/Pro → 下载）
+     - 路径 B：用户已把 ESD 放进"文件"App，App 读本地副本
+  2. 从 ESD 解出 WinPE（映像 #2）
+  3. 用解出的文件组一张 FAT32 启动盘：EFI/BOOT/BOOTAA64.EFI + bootmgfw + WinPE
+  4. 往启动盘注入 autorun（替换 startnet.cmd）
+  5. 把 ESD 原样写进一张自建 **exFAT** 只读盘（install.esd 4.5 GB > FAT32 的 4 GB）
+  ↓
+[阶段 2]（WinPE 里全自动，用户只看）
+  diskpart：GPT + ESP 300 MB + MSR + C:
+  dism /apply-image /imagefile:E:\install.esd /index:6 /applydir:C:\
+  bcdboot C:\Windows /s S: /f UEFI
+  —— 然后关机
+  ↓
+[阶段 3]（换启动项到系统盘，unattend 跑完 OOBE）
+  ↓
+[阶段 4]（挂内置驱动盘，pnputil 装 viogpudo + NetKVM，重启）
+  ↓
+完成
+```
+
+### 13.3 现有代码能接上什么（已核对）
+
+| 能力 | 现状 |
+|---|---|
+| 网络（NAT + `10.0.2.4:80` → App 内 HTTP） | **已有**：`host/net_slirp.c`、`host/share.c`（guest 到 `10.0.2.4:80` 是 Unix socket，可当文件/进度通道） |
+| 稀疏镜像打包/解包 | **已有**：`host/hvsparse.c`（`HVSPARSE` magic，可复用来把做好的盘导出/导入） |
+| NVMe 多盘 | **已有**：`hv_winvirt_create` 的 disk0/disk1 + `devices/nvme.c` |
+| 现在缺：WIM/ESD 读取 | **没有**。全树 0 处 wim/esd 代码 |
+| 现在缺：FAT32 / exFAT 写入 | **没有**。只有 `pflash` 里对 FAT 的一点点约定 |
+
+### 13.4 要新建的模块（这是"零电脑"的真正成本）
+
+| # | 模块 | 规模 | 说明 |
+|---|---|---|---|
+| 1 | `host/wim.c`：WIM 目录解析 + 抽取映像 | 中 | 集成 **wimlib**（LGPL-3，可链进 GPL app）比自己写 LZMS 解码稳得多；自己写 LZMS 约 1500 行且高风险 |
+| 2 | `host/fat32_img.c`：往镜像里建 FAT32 并写文件 | 200–300 行 | 纯逻辑，可在 Linux x86 上用 `fsck.fat`/python 校验 |
+| 3 | `host/exfat_img.c`：建 exFAT 并写一个 >4 GB 大文件 | 300–500 行 | 无日志、结构比 NTFS 简单；同样可 x86 校验 |
+| 4 | `host/peautorun.c`：生成 autorun 脚本 + 改写 `startnet.cmd` | ~200 行脚本模板 | diskpart / dism / bcdboot / 关机 |
+| 5 | 进度回传 | 小 | 两个通道都现成：guest HTTP 打到 `10.0.2.4:80`，或直接读画面 |
+| 6 | Swift 侧接线 + 页 2 改造 | 中 | 状态机从"用户三步"变成"一条进度条" |
+
+### 13.5 两个技术选择（我的倾向）
+
+- **ESD 进 guest：exFAT 自建盘，不走网络。** 网络路线要 PE 里能下载 4.5 GB（WinPE 只有 `certutil`/可能没有 `curl`），慢且不稳；
+  exFAT 盘是"我们生成、一次写好"，DISM 直接读盘，零不确定性。
+- **WIM：集 wimlib，不自写 LZMS。** LZMS 是 range coder + 自适应模型，自己实现容易在边界上错；wimlib 已被 wimlib-imagex 在生产里用过，且是 LGPL（与我们的 GPL-2.0 兼容）。
+
+### 13.6 必须承认的风险
+
+1. **做出来之前没法验证**：这台 x86 主机跑不了（`core/translate.c` 的 aarch64 内联汇编），只能 `-fsyntax-only`；
+   FAT32/exFAT/WIM 这三块是纯逻辑，**可以在 Linux 上写单测**，但 PE 那一段只能在真机上试。
+2. **ESD 的映像序号会漂移**：微软更新目录后，"第 6 个是 Pro"可能变；必须动态扫 `wimlib-imagex info` 的元数据挑 edition，而不是硬编码 6。
+3. **ESD 是加密的可能**：Media Creation Tool 的 ESD 是 LZMS 未加密（wimlib 可读），但如果用户给的是加密 ESD，要先拒绝并提示换源。
+4. **时间**：解 4.5 GB LZMS 在手机上可能 5–15 分钟（IO + 解压），安装本身 1–2 小时。UI 必须给"可以锁屏等着"的语义，并保证 App 不被杀（写 `isIdleTimerDisabled` + 后台宽限，跟 macOS 安装链一致）。
