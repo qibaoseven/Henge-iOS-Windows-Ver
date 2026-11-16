@@ -193,6 +193,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     hv_machine_add_mmio(m, WINVIRT_GED_PA, 0x1000, b, ged_read, ged_write, "acpi-ged");
 
     b->fw_cfg = hv_fw_cfg_create(m, WINVIRT_FW_CFG_PA, (uint16_t)ncpus);
+    /* EDK2's PrePi takes the device tree from x0; its FdtQemuFwCfgLib also looks for
+       "etc/fdt". QEMU publishes both, so do we -- neither path may be the only one. */
+    if (b->dtb && b->dtb_size) hv_fw_cfg_add_file(b->fw_cfg, "etc/fdt", b->dtb, (uint32_t)b->dtb_size);
     b->fb = hv_fb_display_create(m, b->fw_cfg);
     hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0);
 

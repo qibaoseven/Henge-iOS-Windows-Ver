@@ -40,7 +40,7 @@ needs_build=0
 for f in core/classify core/operands core/translate core/dispatch core/memop core/exception core/sysreg core/machine \
          devices/winvirt devices/fdt devices/fw_cfg devices/pflash devices/gicv3 devices/pl011 devices/pl031 \
          devices/pl061 devices/pcie devices/virtio devices/virtio_net devices/virtio_snd devices/virtio_blk \
-         devices/acpi devices/timer devices/nvme devices/hda devices/xhci devices/fb_display \
+         devices/acpi devices/timer devices/nvme devices/hda devices/xhci devices/fb_display devices/usb_storage \
          host/disk host/jit_region host/main_uefi; do
     o=build/posix/vb_$(basename "$f").o
     OBJS="$OBJS $o"
@@ -63,4 +63,8 @@ fi
 $CC $CFLAGS $OBJS build/posix/vb_mmu.o build/posix/vb_enter.o -latomic -lpthread -o "$BIN"
 ( $needs_build ) >/dev/null 2>&1 || true
 
-exec "$BIN" --code "$CODE" --vars "$VARS" --ram "$RAM"
+EXTRA=""
+[ -n "${HV_CD0:-}" ] && EXTRA="$EXTRA --cd0 $HV_CD0"
+[ -n "${HV_CD1:-}" ] && EXTRA="$EXTRA --cd1 $HV_CD1"
+# shellcheck disable=SC2086
+exec "$BIN" --code "$CODE" --vars "$VARS" --ram "$RAM" $EXTRA

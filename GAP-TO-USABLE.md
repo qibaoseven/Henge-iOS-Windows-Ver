@@ -13,7 +13,10 @@
 | 没有 macOS / Xcode | `Makefile` 的 `ios-lib` 用 `xcrun --sdk iphoneos`，只有 Mac 能跑；本机是 x86 Linux，而 `core/translate.c` 有 aarch64 内联汇编（`mrs dczid_el0`），**x86 上连语法检查都过不了** | ① 借一台 Mac；② **GitHub Actions 的 macOS runner**（public 仓库免费）；③ 找有 Mac 的人编 IPA |
 | 签名/权限 | `ios/Henge/Henge.entitlements` 需要 `get-task-allow`（开 JIT）与 `increased-memory-limit`（6 GB 内存） | 沿用现成两个 entitlements 文件；无付费账号时用侧载 + StikDebug |
 
-**验收**：`make ios-lib` 产出 `build/ios/libhengevm.a`；`xcodebuild` 产出可安装的 `.app`。
+| 没有固件 | 板子要两块 64 MB pflash（`code.fd`/`vars.fd`），仓库里没有 | `tools/build-firmware.sh`（`--package` 用发行版 AAVMF，`--source` 编 edk2）；`.github/workflows/firmware.yml` 在 macos-14 上产出 artifact。细节见 `tools/FIRMWARE.md` |
+
+**验收**：`make ios-lib` 产出 `build/ios/libhengevm.a`；`xcodebuild` 产出可安装的 `.app`；
+`tools/build-firmware.sh` 产出两块 64 MB 的 pflash，且 `sh tools/run-uefi.sh` 能在串口上看到 EDK2 的版本行。
 
 ---
 
