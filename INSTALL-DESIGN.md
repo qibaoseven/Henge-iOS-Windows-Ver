@@ -432,3 +432,43 @@ dism /Get-WimInfo /WimFile:"D:\sources\install-pro.esd"
 | 4 GB ≤ 尺寸 | 拆 `install.swm` / `install1.swm` 打进 ISO | 需要 USB CD-ROM |
 
 单版 + `recovery` 压缩通常落在 3.5–4.2 GB 这一带，**不保证一定 <4 GB**，所以必须看第 2 步打印的真实数字再选分支。
+
+---
+
+## 15. 挂 ISO 的全部工作：一张只读 USB CD 的设备契约
+
+> 照 QEMU / UTM 的做法：ISO 只是字节流，QEMU 不解析文件系统，**引导由固件完成**。
+> 我们照抄这条，就只需要实现"一台 USB 只读 CD 驱动器"，不需要任何 ISO/UDF 代码。
+
+### 15.1 分工
+
+| 谁 | 干什么 |
+|---|---|
+| 我们（`devices/usb_storage.c` + xHCI 通用化） | 把 ISO 的字节按 2048 字节块递过去，并应答几条 SCSI 命令 |
+| 固件（EDK2 ArmVirtQemu，即 `code.fd`） | **El Torito**：读 ISO 第 0x11 扇区的 boot catalog → 找到 FAT 启动映像 → 从里面加载 `\EFI\BOOT\BOOTAA64.EFI` |
+| guest（WinPE） | 用自带的 cdfs/udf 驱动把整张盘挂成 E:，`dism /apply-image` |
+
+注意 El Torito 这条路**连 ISO9660 驱动都不需要**：boot catalog 指向的是一个 FAT 映像，固件用普通的 FatPkg 就能读。
+（EDK2 的 `MdeModulePkg/Universal/Disk/PartitionDxe/ElTorito.c` 就是在干这件事。）
+
+### 15.2 设备契约（必须做对的几项）
+
+| 项 | 值 | 做错的后果 |
+|---|---|---|
+| Peripheral Device Type（`INQUIRY` 应答） | **5 = CD-ROM** | 报成 0（磁盘），固件不做 El Torito，也不给 Windows 挂 cdfs |
+| 逻辑块大小 | **2048 字节** | guest 的 LBA 全体错位 |
+| `READ CAPACITY` | 返回**最后一个 LBA** = 文件长度/2048 − 1 | 固件算错盘尾，扫描失败 |
+| 写状态 | `MODE SENSE` 报 **write-protected** | Windows 会尝试写，报错或挂成可写盘 |
+| 介质状态 | media present / tray closed / locked | `GET_EVENT_STATUS_NOTIFICATION` 答错会被判"无盘" |
+| 必须应答的最小命令集 | `INQUIRY`、`TEST UNIT READY`、`REQUEST SENSE`、`READ CAPACITY(10)`、`READ(10)/READ(12)`、`MODE SENSE(6/10)`、`GET CONFIGURATION`、`GET EVENT STATUS NOTIFICATION`、`READ TOC/PMA/ATIP` | 少一条就可能卡在"正在检测介质" |
+
+### 15.3 为什么这条路有先例，不是赌
+
+UTM 的 Windows 11 ARM 虚拟机就是 `-device usb-storage` 挂 ISO 起来的，用的固件同为 EDK2 ArmVirtQemu。
+所以"USB CD + El Torito + Windows PE"这套组合在 Apple Silicon + 同一套固件上已经被跑通过。
+**我们要做的只是让我们的 xHCI 变成一台能被固件认出来的 USB 主机控制器。**
+
+### 15.4 唯一还没验证的点（跟 ISO 格式有关，不跟设备有关）
+
+PE 里能不能看见 payload 盘上的 `install.esd`：9660+UDF 桥接时，>4 GiB 的文件只在 UDF 侧合法，
+需要 PE 有 `udfs.sys`。**这一步只能真机 `dir` 验**，出盘后 5 分钟就能定案。
