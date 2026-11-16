@@ -472,3 +472,55 @@ UTM 的 Windows 11 ARM 虚拟机就是 `-device usb-storage` 挂 ISO 起来的�
 
 PE 里能不能看见 payload 盘上的 `install.esd`：9660+UDF 桥接时，>4 GiB 的文件只在 UDF 侧合法，
 需要 PE 有 `udfs.sys`。**这一步只能真机 `dir` 验**，出盘后 5 分钟就能定案。
+
+---
+
+## 16. 最简形态：直接下微软官方完整 ISO，挂上去让它自己装
+
+> 用户提的收尾方案。它把 §13–§15 里的"自定义 PE + DISM 手装 + 拆 SWM"整条链路**全部删掉**：
+> 官方 ISO 里同时含 **WinPE（boot.wim）** 和 **安装源（sources\install.wim）**，微软自己的 setup 会跑完整个安装。
+
+### 16.1 流程
+
+```
+App 下载官方 Windows 11 ARM64 ISO（几 GB）
+  ↓ 挂成 USB CD-ROM（我们的设备）
+  ↓ 同时挂第二张只读小盘：autounattend.xml（~200 KB，我们内置）
+固件读 El Torito → 起 ISO 里的 WinPE → 跑微软 Setup
+  ↓ autounattend 接管：分区 / 跳 TPM / 选版本 / OOBE / 首登装驱动
+装完 → 进桌面
+```
+
+用户操作：**零**。文件：**零**。服务器：**零**（直连微软）。
+
+### 16.2 这一招顺手解决了一个悬案
+
+我们一直不确定 **PE 里有没有 `udfs.sys`**（§14.6、§15.4 都标成"只能真机验"）。
+官方 ISO 的 `sources\install.wim` 本身就是 **>4 GB**，只能躺在 UDF 侧；而**微软自己的 setup 就是从这张盘上把它读出来装系统的**。
+=> **PE 必然能读 UDF**，否则微软自己都装不了。这一条不用再验了。
+
+### 16.3 必须配的三样东西
+
+| 项 | 为什么 | 怎么做 |
+|---|---|---|
+| `autounattend.xml` | 没有它，Setup 会停在"这台电脑不符合 Windows 11 要求"（无 TPM）、要求选版本、要求联网、要求输账户 | 挂在**第二张只读小盘**的根目录（Setup 会自动扫所有盘的根）。内容：`WindowsPE` 段写 `LabConfig` 四个 Bypass、`diskpart` 式自动分区、**`InstallFrom` 指定 edition**、`oobeSystem` 跳联网/本地账户/时区、`FirstLogonCommands` 装驱动 |
+| 两张 CD 同时挂 | Setup 盘 + answer 盘 | xHCI 通用化后天然支持多设备（本来就要做） |
+| edition 要显式指定 | 官方 ISO 的 `install.wim` 里**含多个 edition**（Home/Pro…），不指定会停下来让用户选 | 在 `autounattend` 的 `InstallFrom`/`InstallTo` 里写死 Pro 的 index；**建议下载时就选"多版本"ISO 并用 index 指定**，或用官方 Pro-only 的下载项 |
+
+### 16.4 唯一的不确定性在"下载源"
+
+微软官网的 ISO 直链是**带时效 token** 的（从下载页跳转才给），不能硬编码进 App。三条可行路径：
+
+| 路径 | 说明 | 代价 |
+|---|---|---|
+| 用户在 Safari 里点一次"下载 Windows 11 磁盘映像"，App 从"文件"里读 | 最稳，法律上最干净（用户自己的授权） | 用户多一步"点下载" |
+| App 内解析微软 `products.cab` → 拿 **ESD** 直链 | AppleVM 就是这么做的，直链稳定 | 只有 ESD，**没有 WinPE** → 回到需要自定义 PE 的老路 |
+| 第三方镜像/UUP dump | 不可控 | 不推荐 |
+
+**结论：走"用户在 Safari 点一下开始下载 → App 监视/接管下载"这条**，既不碰 token 问题，也不需要服务器。
+
+### 16.5 对缺口清单的影响
+
+- **删掉**：拆 SWM、打 ISO、exFAT/FAT32 写入器、ISO9660/UDF 解析、自定义 PE 制作（`GAP-TO-USABLE.md` 阶段 3 的 3.2/3.3 大幅简化）；
+- **保留并成为唯一硬活**：USB CD-ROM 设备（§15 的契约）；
+- **新增**：`autounattend.xml` 生成器（几百行 XML 模板）+ 第二张 answer 盘（构建时生成的小 ISO）。
