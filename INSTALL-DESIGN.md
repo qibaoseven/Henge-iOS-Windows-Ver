@@ -408,22 +408,27 @@ BOT 状态机和 SCSI 命令时序的正确性，只能靠真机 + PE 的实际�
 
 多版 ESD 里绝大部分体积是其它 edition 的重复文件（Home / 教育版 …），只导出一个 edition 能砍掉不少。
 
-**硬条件：必须导成 solid LZMS，否则会超 4 GB。**
+**用 DISM 自己的 `/Export-Image`，`/Compress:recovery` 就是 ESD 那种 LZMS solid，不要用 LZX。**
 
-```bash
-# 先看 index：Pro 是哪一号（24H2 ARM64 零售 ESD 通常是 6，别硬编码）
-wimlib-imagex info Win11_ARM64.esd
+```bat
+:: 1) 先导出到新文件（不能原地导出，源和目标同一个文件会被拒）
+dism /Export-Image /SourceImageFile:"D:\sources\install.esd" /SourceIndex:6 ^
+     /DestinationImageFile:"D:\sources\install-pro.esd" /Compress:recovery
 
-# 只导 Pro，solid LZMS
-wimlib-imagex export Win11_ARM64.esd <Pro的index> install.esd \
-    --compress=LZMS --solid --chunk-size=128MiB
-
-ls -l install.esd     # ← 用这个数字决定后面走哪条
+:: 2) 尺寸出来了再决定，替换前核对一下索引
+dism /Get-WimInfo /WimFile:"D:\sources\install-pro.esd"
 ```
+
+**两个必踩的坑：**
+
+1. **导出后索引变成 1**，不是 6。原 ESD 的第 6 个映像是 Pro，导成单版 ESD 后里面只有 1 个映像，
+   所以 PE 里要写 `/index:1`。写 6 会报 "index out of range"。
+2. **不能原地导出**（`/DestinationImageFile` 指向同一个 `install.esd` 会失败）。先导到 `install-pro.esd`，
+   确认大小和无误后再替换，别把原 ESD 弄坏了。
 
 | 导出后大小 | 走哪条 | 设备工作 |
 |---|---|---|
 | **< 4 GB** | payload 放 **FAT32 盘**，当普通 NVMe 挂（PE 的 FAT 驱动直接读） | **连 USB CD-ROM 都不用给 payload**，只剩 PE 引导这一件事 |
-| ≥ 4 GB | 拆 `install.swm` / `install1.swm` 打进 ISO | 需要 USB CD-ROM |
+| 4 GB ≤ 尺寸 | 拆 `install.swm` / `install1.swm` 打进 ISO | 需要 USB CD-ROM |
 
-注意：`--compress=LZX` 导出来的单版通常 4.5–5 GB，会超；**只有 solid LZMS 才有机会压到 4 GB 以下**，而且导出过程在 iPad 上可能跑 20–60 分钟（CPU 密集），要看实测数字，不能拍脑袋。
+单版 + `recovery` 压缩通常落在 3.5–4.2 GB 这一带，**不保证一定 <4 GB**，所以必须看第 2 步打印的真实数字再选分支。
