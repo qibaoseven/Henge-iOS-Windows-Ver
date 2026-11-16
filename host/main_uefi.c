@@ -51,12 +51,16 @@ int main(int argc, char **argv) {
     const char *cd_paths[3] = {NULL, NULL, NULL};
     int disk_ro = 0;
     int ram_mb = 2048, ncpus = 4, verbose = 0;
+    int display_kind = HV_DISPLAY_AUTO;
+    uint32_t panel_w = 0, panel_h = 0;
     static struct option opts[] = {{"code", required_argument, 0, 'c'},
                                    {"vars", required_argument, 0, 'v'},
                                    {"ram", required_argument, 0, 'r'},
                                    {"cpus", required_argument, 0, 'n'},
                                    {"disk", required_argument, 0, 'd'},
                                    {"disk-ro", no_argument, 0, 'D'},
+                                   {"display", required_argument, 0, 'g'},
+                                   {"panel", required_argument, 0, 'p'},
                                    {"cd0", required_argument, 0, '0'},
                                    {"cd1", required_argument, 0, '1'},
                                    {"cd2", required_argument, 0, '2'},
@@ -64,7 +68,7 @@ int main(int argc, char **argv) {
                                    {"verbose", no_argument, 0, 'V'},
                                    {0, 0, 0, 0}};
     int o;
-    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV0:1:2:", opts, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV0:1:2:g:p:", opts, NULL)) != -1) {
         switch (o) {
         case 'c': code = optarg; break;
         case 'v': vars = optarg; break;
@@ -76,6 +80,21 @@ int main(int argc, char **argv) {
         case '0': cd_paths[0] = optarg; break;
         case '1': cd_paths[1] = optarg; break;
         case '2': cd_paths[2] = optarg; break;
+        case 'g':
+            if (!strcmp(optarg, "ramfb")) display_kind = HV_DISPLAY_RAMFB;
+            else if (!strcmp(optarg, "gpu")) display_kind = HV_DISPLAY_VIRTIO_GPU;
+            else if (!strcmp(optarg, "auto")) display_kind = HV_DISPLAY_AUTO;
+            else {
+                fprintf(stderr, "hv_uefi: --display takes ramfb, gpu or auto\n");
+                return 2;
+            }
+            break;
+        case 'p':
+            if (sscanf(optarg, "%ux%u", &panel_w, &panel_h) != 2) {
+                fprintf(stderr, "hv_uefi: --panel takes WIDTHxHEIGHT\n");
+                return 2;
+            }
+            break;
         case 'V': verbose = 1; break;
         default: return 2;
         }
@@ -109,7 +128,8 @@ int main(int argc, char **argv) {
 
     HvWinVirt b;
     memset(&b, 0, sizeof b);
-    if (hv_winvirt_create(&b, m, cpus, ncpus, (uint64_t)ram_mb << 20, NULL, code, vars, disk, NULL, NULL, 0) != 0) {
+    if (hv_winvirt_create(&b, m, cpus, ncpus, (uint64_t)ram_mb << 20, NULL, code, vars, disk, NULL, NULL, 0,
+                          display_kind, panel_w, panel_h) != 0) {
         fprintf(stderr, "hv_uefi: cannot build the machine (firmware, memory or a window refused)\n");
         if (disk) hv_disk_close(disk);
         return 4;

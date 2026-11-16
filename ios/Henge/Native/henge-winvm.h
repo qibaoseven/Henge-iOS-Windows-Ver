@@ -17,6 +17,10 @@ int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0
    the guest writes, not what it can see. 0, or -1. Existing files are kept. */
 int henge_winvm_make_disk(const char *path, uint64_t gb);
 
+/* What the guest's screen should be, and which display hardware it gets:
+   0 ramfb only, 1 virtio-gpu only, 2 both (default). Call before boot. */
+void henge_winvm_set_display(int kind, uint32_t width, uint32_t height);
+
 /* 0 not started, 1 running, 2 stopped, 3 starting. */
 int henge_winvm_state(void);
 /* A new generation starts with each successful boot. */

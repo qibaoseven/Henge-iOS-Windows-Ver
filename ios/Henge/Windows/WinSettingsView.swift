@@ -14,6 +14,19 @@ struct WinSettingsView: View {
     @State private var importError: String?
 
     private let ramChoices = [4096, 6144, 8192, 12288]
+    private let panelChoices: [(Int, Int)] = [(1024, 768), (1280, 800), (1440, 900), (1920, 1200)]
+    private var panelBinding: Binding<String> {
+        Binding(
+            get: { "\(machine.panelW)x\(machine.panelH)" },
+            set: { tag in
+                let parts = tag.split(separator: "x")
+                if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) {
+                    machine.panelW = w
+                    machine.panelH = h
+                }
+            }
+        )
+    }
     private let cpuChoices = [2, 4, 6, 8]
 
     var body: some View {
@@ -30,6 +43,24 @@ struct WinSettingsView: View {
                     Picker("CPU", selection: $machine.cpus) {
                         ForEach(cpuChoices, id: \.self) { Text("\($0) 核").tag($0) }
                     }
+                }
+                .disabled(engine.running)
+
+                Section {
+                    Picker("显示设备", selection: $machine.displayKind) {
+                        Text("自动（ramfb + virtio-gpu）").tag(2)
+                        Text("仅 virtio-gpu").tag(1)
+                        Text("仅 ramfb").tag(0)
+                    }
+                    Picker("面板分辨率", selection: panelBinding) {
+                        ForEach(panelChoices, id: \.self) { size in
+                            Text("\(size.0) × \(size.1)").tag("\(size.0)x\(size.1)")
+                        }
+                    }
+                } header: {
+                    Text("显示")
+                } footer: {
+                    Text("Windows 只认 virtio-gpu（1af4:1050，viogpudo 驱动）。ramfb 只有固件和 Linux 认，选“仅 ramfb”时 Windows 装完会没有显示驱动。")
                 }
                 .disabled(engine.running)
 

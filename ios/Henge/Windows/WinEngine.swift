@@ -51,6 +51,11 @@ final class WinEngine: ObservableObject {
             return
         }
 
+        // Which display hardware this machine gets, and how big it should think
+        // the panel is -- told to the engine before it builds the board, because
+        // a driver asks for a mode long before the UI can react.
+        henge_winvm_set_display(Int32(m.displayKind), UInt32(m.panelW), UInt32(m.panelH))
+
         let ram = UInt64(m.ramMB)
         let cpus = Int32(m.cpus)
         let code = m.codePath, vars = m.varsPath, disk = m.diskPath

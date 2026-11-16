@@ -43,6 +43,25 @@
 | 2.5 | ~~`virtio-gpu` 设备不存在~~ **已写出 2D**（`devices/virtio_gpu.c`，约 480 行） | 板子上原来只有 `ramfb`，而 `viogpudo.inf` 的 HardwareID 写死 `PCI\VEN_1AF4&DEV_1050`。现在是 1af4:1050、modern-only、两个队列（control+cursor），实现了 `GET_DISPLAY_INFO` / `RESOURCE_CREATE_2D` / `ATTACH_BACKING` / `TRANSFER_TO_HOST_2D` / `SET_SCANOUT` / `RESOURCE_FLUSH` / `UNREF`，scanout 直接接 `HvFbDisplay`（ramfb 与它共用一个呈现路径） | 结构体尺寸用 `_Static_assert` 钉住；**未在真机验证** | 设备管理器出现显示适配器；分辨率跟着 SET_SCANOUT 变 |
 | 2.6 | virtio-vga / 3D（virgl） | 都不做：virtio-vga 只是多一套 legacy VGA 寄存器 + Option ROM，UEFI 引导用不到；3D 要 virglrenderer + `viogpu3d`，是 AppleVM 那条路，等 2D 跑通再说 | — | — |
 
+### 显示设备模型：QEMU 有一堆，ARM64 Windows 只认两个
+
+| 模型 | PCI / 位置 | 谁绑它 | 结论 |
+|---|---|---|---|
+| `ramfb` | fw_cfg `etc/ramfb`，无 PCI | **只有 GOP 和 Linux**；Windows 无驱动 | 保留：固件出画面要用 |
+| `virtio-gpu-pci`（= "GPU PCII"） | `1af4:1050`，class `03/80` | `viogpudo`（DOD，仅 2D） | **已实现**，`devices/virtio_gpu.c` |
+| `virtio-vga` | `1af4:1050` + VGA 寄存器 + Option ROM | 同上，但只为 BIOS 引导补 VGA 兼容 | 不做：UEFI 客人不碰 VGA 寄存器 |
+| `virtio-gpu-gl-pci` | 同上 + `VIRTIO_GPU_F_VIRGL` | `viogpu3d`（3D） | 后续；要先有 2D 基线 |
+| `bochs-display` | `1234:1111` | Windows 无 ARM64 驱动（VBEMP 是 x86） | 不做 |
+| `qxl` / `stdvga` / `vmware-svga` | — | 全是 x86/x64 驱动或 BIOS 路径 | 不做 |
+
+板子现在有 `HvDisplayKind`：`RAMFB` / `VIRTIO_GPU` / `AUTO`（默认，两者都建）。UI 设置页可选，命令行也可以：
+
+```sh
+HV_DISPLAY=gpu HV_PANEL=1440x900 sh tools/run-uefi.sh
+```
+
+`GET_DISPLAY_INFO` 现在报的是**面板 hint**（`WinMachine.panelW/H` → `hv_fb_display_set_hint`），而不是固件留下的 1024×768 —— 否则驱动会按 1024×768 建 framebuffer 再拉伸。
+
 **2.5 是这个项目目前最硬的一个漏洞**：ramfb 只有 Linux 认，Windows 侧没有任何驱动会绑定它；WinPE 也许靠 UEFI GOP 还能出画面（未验证），但安装完的系统一定要 `virtio-gpu` + `viogpudo`。驱动盘（`tools/make-driver-iso.sh`，2.3 MB）已经把 `viogpudo` 备好了，缺的是**给它一个能绑的设备**。
 
 2.1 的规格已经写成契约：`INSTALL-DESIGN.md` §15（设备类型必须报 5 = CD-ROM、逻辑块 2048、`READ CAPACITY` 返回最后一个 LBA、`MODE SENSE` 报写保护，以及 9 条必须应答的 SCSI 命令）。

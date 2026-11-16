@@ -25,6 +25,10 @@ typedef struct HvFbDisplay {
     uint32_t fourcc; /* DRM fourcc, e.g. XR24 / AR24 (32-bit BGRX) */
     int active;
 
+    /* What the panel would like to be, before any guest mode exists. virtio-gpu
+       reports this through GET_DISPLAY_INFO, and the firmware's GOP may pick it. */
+    uint32_t hint_w, hint_h;
+
     /* Metal presenter handle (created lazily by fb_metal.m) */
     void *metal;
 } HvFbDisplay;
@@ -35,6 +39,9 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg);
    all the presenter needs. */
 int hv_fb_display_set_scanout(HvFbDisplay *fb, const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t stride,
                               uint32_t fourcc);
+/* The panel's preferred geometry, for guests that ask before they set a mode.
+   Call before the CPU starts. */
+void hv_fb_display_set_hint(HvFbDisplay *fb, uint32_t w, uint32_t h);
 
 /* Thread-safe snapshot of current scanout pointer and dimensions; returns 0 if active, -1 if not yet set. */
 int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride);

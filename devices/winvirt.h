@@ -54,6 +54,16 @@
 #define WINVIRT_MSI_BASE      80       /* INTIDs 80..143 (64 MSI-X vectors) */
 #define WINVIRT_MSI_COUNT     64
 
+/* Which display hardware the guest sees. Only two of them are any use to an
+   ARM64 Windows guest: ramfb has no Windows driver at all, and virtio-gpu is the
+   one viogpudo binds. The others QEMU offers (virtio-vga, bochs, qxl, stdvga)
+   need VGA registers or x64-only drivers, so they are not modelled here. */
+typedef enum {
+    HV_DISPLAY_RAMFB = 0,      /* firmware/Linux only */
+    HV_DISPLAY_VIRTIO_GPU = 1, /* 1af4:1050, 2D */
+    HV_DISPLAY_AUTO = 2,       /* both: firmware gets ramfb, Windows picks the GPU */
+} HvDisplayKind;
+
 typedef struct HvWinVirt {
     HvMachine *m;
     HvCpu *cpu;
@@ -79,6 +89,7 @@ typedef struct HvWinVirt {
     HvNvme *nvme1;
     HvXhci *usb;
     HvVirtioGpu *gpu;
+    int display_kind;
     HvHda *hda;
     HvVirtioSnd *snd;
 
@@ -89,7 +100,8 @@ typedef struct HvWinVirt {
 uint8_t *hv_alloc_no_footprint(uint64_t size);
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound);
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      int display_kind, uint32_t panel_w, uint32_t panel_h);
 /* Put an ISO on xHCI port 3 as a read-only CD-ROM (before the CPU starts).
    Call twice to attach two CDs (setup media + payload media). */
 int hv_winvirt_attach_cd(HvWinVirt *b, const char *iso_path);

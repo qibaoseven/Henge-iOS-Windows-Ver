@@ -194,8 +194,21 @@ static uint32_t handle(HvVirtioGpu *g, const HvVirtqElem *e, GpuHdr *resp, uint3
         gpu_hdr(&r->hdr, GPU_RESP_OK_DISPLAY_INFO, &req);
         r->pmodes[0].rect.x = 0;
         r->pmodes[0].rect.y = 0;
-        r->pmodes[0].rect.width = g->fb ? g->fb->width : 1280;
-        r->pmodes[0].rect.height = g->fb ? g->fb->height : 800;
+        /* Panel hint first: the firmware's GOP often leaves a 1024x768 ramfb
+           behind, and answering with that would make the driver pick a mode
+           nobody wants. */
+        uint32_t w = 1280, h = 800;
+        if (g->fb) {
+            if (g->fb->hint_w && g->fb->hint_h) {
+                w = g->fb->hint_w;
+                h = g->fb->hint_h;
+            } else if (g->fb->width && g->fb->height) {
+                w = g->fb->width;
+                h = g->fb->height;
+            }
+        }
+        r->pmodes[0].rect.width = w;
+        r->pmodes[0].rect.height = h;
         r->pmodes[0].enabled = 1;
         if (sizeof *r > resp_cap) {
             gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);

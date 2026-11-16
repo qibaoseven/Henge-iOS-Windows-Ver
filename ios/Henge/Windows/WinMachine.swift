@@ -12,6 +12,11 @@ struct WinMachine: Codable, Identifiable, Hashable {
     var stage: Int = 0
     var createdAt: Date = Date()
     var lastBootedAt: Date?
+    /// Which display hardware the guest gets: 2 auto (ramfb + virtio-gpu),
+    /// 0 ramfb only, 1 virtio-gpu only. Stored loosely so old files still load.
+    var displayKind: Int = 2
+    var panelW: Int = 1440
+    var panelH: Int = 900
 
     var folder: URL { WinStore.root.appendingPathComponent(id.uuidString, isDirectory: true) }
     var diskPath: String { folder.appendingPathComponent("disk.img").path }
@@ -26,6 +31,25 @@ struct WinMachine: Codable, Identifiable, Hashable {
     var peISOExists: Bool { FileManager.default.fileExists(atPath: peISOPath) }
     var payloadISOExists: Bool { FileManager.default.fileExists(atPath: payloadISOPath) }
     var diskExists: Bool { FileManager.default.fileExists(atPath: diskPath) }
+
+    /// Older machines.json files predate the display fields, so they are decoded
+    /// leniently rather than failing the whole list.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        ramMB = try c.decodeIfPresent(Int.self, forKey: .ramMB) ?? 6144
+        cpus = try c.decodeIfPresent(Int.self, forKey: .cpus) ?? 4
+        diskGB = try c.decodeIfPresent(Int.self, forKey: .diskGB) ?? 32
+        stage = try c.decodeIfPresent(Int.self, forKey: .stage) ?? 0
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        lastBootedAt = try c.decodeIfPresent(Date.self, forKey: .lastBootedAt)
+        displayKind = try c.decodeIfPresent(Int.self, forKey: .displayKind) ?? 2
+        panelW = try c.decodeIfPresent(Int.self, forKey: .panelW) ?? 1440
+        panelH = try c.decodeIfPresent(Int.self, forKey: .panelH) ?? 900
+    }
+
+    init(name: String) { self.name = name }
 
     var diskBytes: Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: diskPath)

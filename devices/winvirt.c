@@ -125,7 +125,8 @@ static void uart_stdout_cb(void *opaque, uint8_t c) {
 
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound) {
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      int display_kind, uint32_t panel_w, uint32_t panel_h) {
     memset(b, 0, sizeof *b);
     b->m = m;
     b->cpu = cpu;
@@ -197,6 +198,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
        "etc/fdt". QEMU publishes both, so do we -- neither path may be the only one. */
     if (b->dtb && b->dtb_size) hv_fw_cfg_add_file(b->fw_cfg, "etc/fdt", b->dtb, (uint32_t)b->dtb_size);
     b->fb = hv_fb_display_create(m, b->fw_cfg);
+    b->display_kind = display_kind;
+    /* The panel's size is what the guest should be told before it picks a mode. */
+    hv_fb_display_set_hint(b->fb, panel_w ? panel_w : 1440, panel_h ? panel_h : 900);
     hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0);
 
     /* 7. PCIe Root Complex (GPEX):
@@ -219,7 +223,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     b->usb = hv_xhci_create(m, b->pcie);
     /* The GPU Windows talks to. ramfb stays for the firmware and for Linux; the
        two share one scanout in HvFbDisplay, whoever sets it last wins. */
-    b->gpu = hv_virtio_gpu_create(m, b->pcie, b->fb);
+    if (b->display_kind != HV_DISPLAY_RAMFB) b->gpu = hv_virtio_gpu_create(m, b->pcie, b->fb);
     b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
     (void)enable_sound;

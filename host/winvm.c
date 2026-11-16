@@ -195,7 +195,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     uint64_t ram_bytes = (c->ram_mb ? c->ram_mb : 4096ULL) << 20;
     static const uint8_t mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
     if (hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
-                          d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
+                          d0_ptr, d1_ptr, mac, c->enable_sound, c->display_kind, c->panel_w, c->panel_h) != 0) {
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
     /* ISO media: xHCI port 3 is a read-only CD-ROM. Attached here, before the CPU

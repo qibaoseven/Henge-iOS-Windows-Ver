@@ -73,6 +73,14 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     return fb;
 }
 
+void hv_fb_display_set_hint(HvFbDisplay *fb, uint32_t w, uint32_t h) {
+    if (!fb || w < 64 || h < 64 || w > 8192 || h > 8192) return;
+    pthread_mutex_lock(&fb->mu);
+    fb->hint_w = w;
+    fb->hint_h = h;
+    pthread_mutex_unlock(&fb->mu);
+}
+
 int hv_fb_display_set_scanout(HvFbDisplay *fb, const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t stride,
                               uint32_t fourcc) {
     if (!fb) return -1;

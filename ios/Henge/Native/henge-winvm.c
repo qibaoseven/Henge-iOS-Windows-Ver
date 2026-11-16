@@ -23,6 +23,8 @@ static pthread_mutex_t api_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t generation;
 static const char *exit_reason;
 static int board_in_use; /* the board holds open media that must be released */
+static int display_kind = 2; /* both, until the UI says otherwise */
+static uint32_t panel_w, panel_h;
 
 HENGE_EXPORT HengeDualMapping *henge_ios_jit_get_mapping(void);
 
@@ -81,6 +83,9 @@ int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0
     c.jit_bytes = jit->size;
     c.jit_rx = jit->rx_addr;
     c.jit_rw = jit->rw_addr;
+    c.display_kind = display_kind;
+    c.panel_w = panel_w;
+    c.panel_h = panel_h;
     c.log = 0;
     c.enable_sound = 0; /* HDA is for the Mac guest; Windows has no driver for it yet */
 
@@ -125,6 +130,12 @@ void henge_winvm_stop(void) {
 void henge_winvm_power_button(void) { hv_winvm_power_button(); }
 
 void henge_winvm_flush_disks(void) { hv_winvm_flush_disks(); }
+
+void henge_winvm_set_display(int kind, uint32_t width, uint32_t height) {
+    display_kind = kind < 0 || kind > 2 ? 2 : kind;
+    panel_w = width;
+    panel_h = height;
+}
 
 void henge_winvm_set_display_layer(void *layer) { hv_winvm_set_display_layer(layer); }
 

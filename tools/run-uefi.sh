@@ -67,5 +67,7 @@ EXTRA=""
 [ -n "${HV_CD0:-}" ] && EXTRA="$EXTRA --cd0 $HV_CD0"
 [ -n "${HV_CD1:-}" ] && EXTRA="$EXTRA --cd1 $HV_CD1"
 [ -n "${HV_CD2:-}" ] && EXTRA="$EXTRA --cd2 $HV_CD2"
+[ -n "${HV_DISPLAY:-}" ] && EXTRA="$EXTRA --display $HV_DISPLAY"
+[ -n "${HV_PANEL:-}" ] && EXTRA="$EXTRA --panel $HV_PANEL"
 # shellcheck disable=SC2086
 exec "$BIN" --code "$CODE" --vars "$VARS" --ram "$RAM" $EXTRA
