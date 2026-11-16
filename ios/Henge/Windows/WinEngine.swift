@@ -21,16 +21,19 @@ final class WinEngine: ObservableObject {
 
     private init() {}
 
-    /// Which discs this stage needs. Setup media is the PE ISO plus the payload
-    /// ISO; later stages only need the built-in driver disc.
-    private func media(for m: WinMachine) -> (String?, String?) {
+    /// Which discs this stage needs, in tray order. The driver disc rides along
+    /// from the very first boot: WinNTSetup reads answer/unattend.xml off it, and
+    /// FirstLogonCommands finds the same disc later to install the drivers, so
+    /// nothing has to be swapped mid-install.
+    private func media(for m: WinMachine) -> (String?, String?, String?) {
+        let drivers = FileManager.default.fileExists(atPath: m.driverISOPath) ? m.driverISOPath : nil
         switch m.stage {
         case 0, 1:
-            return (m.peISOExists ? m.peISOPath : nil, m.payloadISOExists ? m.payloadISOPath : nil)
+            return (m.peISOExists ? m.peISOPath : nil, m.payloadISOExists ? m.payloadISOPath : nil, drivers)
         case 3:
-            return (FileManager.default.fileExists(atPath: m.driverISOPath) ? m.driverISOPath : nil, nil)
+            return (drivers, nil, nil)
         default:
-            return (nil, nil)
+            return (nil, nil, nil)
         }
     }
 
@@ -55,11 +58,13 @@ final class WinEngine: ObservableObject {
         // convert on its own, so each disc gets a C string of its own.
         let cd0: UnsafePointer<CChar>? = media.0.flatMap { strdup($0).map { UnsafePointer($0) } }
         let cd1: UnsafePointer<CChar>? = media.1.flatMap { strdup($0).map { UnsafePointer($0) } }
+        let cd2: UnsafePointer<CChar>? = media.2.flatMap { strdup($0).map { UnsafePointer($0) } }
 
         Task.detached(priority: .userInitiated) {
             defer {
                 if let p = cd0 { free(UnsafeMutablePointer(mutating: p)) }
                 if let p = cd1 { free(UnsafeMutablePointer(mutating: p)) }
+                if let p = cd2 { free(UnsafeMutablePointer(mutating: p)) }
             }
             do {
                 try WinStore.prepare(m)
@@ -71,7 +76,7 @@ final class WinEngine: ObservableObject {
             let rc = code.withCString { codePtr in
                 vars.withCString { varsPtr in
                     disk.withCString { diskPtr in
-                        henge_winvm_boot(codePtr, varsPtr, diskPtr, cd0, cd1, ram, cpus, &err, 512)
+                        henge_winvm_boot(codePtr, varsPtr, diskPtr, cd0, cd1, cd2, ram, cpus, &err, 512)
                     }
                 }
             }

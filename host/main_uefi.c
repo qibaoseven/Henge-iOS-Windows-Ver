@@ -48,7 +48,7 @@ static int fw_has(const HvFwCfg *fc, const char *name) {
 int main(int argc, char **argv) {
     const char *code = "firmware/edk2-aarch64-code.fd", *vars = "firmware/edk2-arm-vars.fd";
     const char *save_vars = NULL, *disk_path = NULL;
-    const char *cd_paths[2] = {NULL, NULL};
+    const char *cd_paths[3] = {NULL, NULL, NULL};
     int disk_ro = 0;
     int ram_mb = 2048, ncpus = 4, verbose = 0;
     static struct option opts[] = {{"code", required_argument, 0, 'c'},
@@ -59,11 +59,12 @@ int main(int argc, char **argv) {
                                    {"disk-ro", no_argument, 0, 'D'},
                                    {"cd0", required_argument, 0, '0'},
                                    {"cd1", required_argument, 0, '1'},
+                                   {"cd2", required_argument, 0, '2'},
                                    {"save-vars", required_argument, 0, 's'},
                                    {"verbose", no_argument, 0, 'V'},
                                    {0, 0, 0, 0}};
     int o;
-    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV0:1:", opts, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV0:1:2:", opts, NULL)) != -1) {
         switch (o) {
         case 'c': code = optarg; break;
         case 'v': vars = optarg; break;
@@ -74,6 +75,7 @@ int main(int argc, char **argv) {
         case 's': save_vars = optarg; break;
         case '0': cd_paths[0] = optarg; break;
         case '1': cd_paths[1] = optarg; break;
+        case '2': cd_paths[2] = optarg; break;
         case 'V': verbose = 1; break;
         default: return 2;
         }
@@ -112,7 +114,7 @@ int main(int argc, char **argv) {
         if (disk) hv_disk_close(disk);
         return 4;
     }
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         if (!cd_paths[i]) continue;
         if (hv_winvirt_attach_cd(&b, cd_paths[i]) != 0) {
             fprintf(stderr, "hv_uefi: cannot attach the CD image %s\n", cd_paths[i]);

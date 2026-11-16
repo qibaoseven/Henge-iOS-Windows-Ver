@@ -1,0 +1,17 @@
+# What the driver disc takes out of virtio-win, and what it is called on the disc.
+# Left: name on the ISO (8.3, because tools/make_iso.py writes plain ISO9660).
+# Right: path inside virtio-win, by Rock Ridge name.
+
+DRIVERS/VIOGPUDO/VIOGPUDO.SYS = /viogpudo/w11/ARM64/viogpudo.sys
+DRIVERS/VIOGPUDO/VIOGPUDO.INF = /viogpudo/w11/ARM64/viogpudo.inf
+DRIVERS/VIOGPUDO/VIOGPUDO.CAT = /viogpudo/w11/ARM64/viogpudo.cat
+DRIVERS/VIOGPUDO/VGPUSRV.EXE  = /viogpudo/w11/ARM64/vgpusrv.exe
+DRIVERS/VIOGPUDO/VIOGPUAP.EXE = /viogpudo/w11/ARM64/viogpuap.exe
+
+DRIVERS/NETKVM/NETKVM.SYS     = /NetKVM/w11/ARM64/netkvm.sys
+DRIVERS/NETKVM/NETKVM.INF     = /NetKVM/w11/ARM64/netkvm.inf
+DRIVERS/NETKVM/NETKVM.CAT     = /NetKVM/w11/ARM64/netkvm.cat
+DRIVERS/NETKVM/NETKVMCO.EXE   = /NetKVM/w11/ARM64/netkvmco.exe
+DRIVERS/NETKVM/NETKVMP.EXE    = /NetKVM/w11/ARM64/netkvmp.exe
+
+CERT/RHCA.CER                 = /cert/Virtio_Win_Red_Hat_CA.cer

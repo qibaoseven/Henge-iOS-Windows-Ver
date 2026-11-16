@@ -47,7 +47,7 @@ const char *henge_winvm_exit_reason(void) {
 }
 
 int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0, const char *cd0, const char *cd1,
-                     uint64_t ram_mb, int ncpus, char *err, size_t errlen) {
+                     const char *cd2, uint64_t ram_mb, int ncpus, char *err, size_t errlen) {
     if (!code_fd || !vars_fd) {
         snprintf(err, errlen, "The firmware files (code.fd, vars.fd) are missing.");
         return -1;
@@ -75,6 +75,7 @@ int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0
     c.disk0 = disk0;
     c.cd0 = cd0;
     c.cd1 = cd1;
+    c.cd2 = cd2;
     c.ram_mb = ram_mb ? ram_mb : 6144; /* the design's default: 6 GB */
     c.ncpus = ncpus;
     c.jit_bytes = jit->size;
@@ -83,9 +84,9 @@ int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0
     c.log = 0;
     c.enable_sound = 0; /* HDA is for the Mac guest; Windows has no driver for it yet */
 
-    fprintf(stderr, "henge: booting Windows with %d CPUs, %llu MB RAM, %zu MB JIT, disk=%s cd0=%s cd1=%s\n", c.ncpus,
-            (unsigned long long)c.ram_mb, jit->size >> 20, disk0 ? disk0 : "(none)", cd0 ? cd0 : "(none)",
-            cd1 ? cd1 : "(none)");
+    fprintf(stderr, "henge: booting Windows with %d CPUs, %llu MB RAM, %zu MB JIT, disk=%s cd0=%s cd1=%s cd2=%s\n",
+            c.ncpus, (unsigned long long)c.ram_mb, jit->size >> 20, disk0 ? disk0 : "(none)",
+            cd0 ? cd0 : "(none)", cd1 ? cd1 : "(none)", cd2 ? cd2 : "(none)");
 
     if (hv_winvm_create(&c, err, errlen) != 0) {
         atomic_store(&state, 0);

@@ -208,6 +208,10 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         if (hv_winvirt_attach_cd(&board, c->cd1) != 0)
             return fail(err, errlen, "Cannot open the second CD-ROM image.");
     }
+    if (c->cd2 && *c->cd2) {
+        if (hv_winvirt_attach_cd(&board, c->cd2) != 0)
+            return fail(err, errlen, "Cannot open the third CD-ROM image.");
+    }
     hv_winvirt_reset_cpu(&board);
 
     share_on = 0;
@@ -328,6 +332,10 @@ int hv_winvm_run_cpu0(void) {
     if (c->cd1 && *c->cd1) {
         if (hv_winvirt_attach_cd(&board, c->cd1) != 0)
             return fail(err, errlen, "Cannot open the second CD-ROM image.");
+    }
+    if (c->cd2 && *c->cd2) {
+        if (hv_winvirt_attach_cd(&board, c->cd2) != 0)
+            return fail(err, errlen, "Cannot open the third CD-ROM image.");
     }
     hv_winvirt_reset_cpu(&board);
             m.flush_pending = 1;

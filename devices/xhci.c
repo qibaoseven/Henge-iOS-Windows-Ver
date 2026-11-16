@@ -284,7 +284,7 @@ static void set_ep_state(HvXhci *x, int slot, int dci, uint32_t state) {
 static int cd_control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max);
 
 static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max) {
-    if (sl->port >= 3) return cd_control(x, sl, setup, out, max);
+    if (sl->port >= 3 && sl->port < 3 + HV_CD_TRAYS) return cd_control(x, sl, setup, out, max);
     int is_tab = sl->port == 2;
     uint8_t type = setup[0], req = setup[1];
     uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
@@ -617,7 +617,7 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     x->slots[slot].idle = 0;
     if (port == 1) x->kbd_slot = slot;
     else if (port == 2) x->tab_slot = slot;
-    else if (port >= 3 && port <= 4 && x->cd_attached[port - 3]) {
+    else if (port >= 3 && port < 3 + HV_CD_TRAYS && x->cd_attached[port - 3]) {
         x->cd_slot[port - 3] = slot;
         hv_usb_cd_reset(&x->cd[port - 3]); /* a new device gets a clean transport state */
     }
@@ -690,7 +690,7 @@ static void run_commands(HvXhci *x) {
             if (slot >= 1 && slot <= HV_XHCI_SLOTS) {
                 if (slot == x->kbd_slot) x->kbd_slot = 0;
                 if (slot == x->tab_slot) x->tab_slot = 0;
-                for (int t = 0; t < 2; t++)
+                for (int t = 0; t < HV_CD_TRAYS; t++)
                     if (slot == x->cd_slot[t]) x->cd_slot[t] = 0;
                 memset(&x->slots[slot], 0, sizeof x->slots[slot]);
             }
@@ -779,7 +779,7 @@ static void ports_connect_init(HvXhci *x) {
             /* The CD trays only show a device once an image is attached. */
             int t = p - 2;
             x->portsc[p] = PORT_PP;
-            if (x->cd_attached[t] && x->cd[t].present)
+            if (t < HV_CD_TRAYS && x->cd_attached[t] && x->cd[t].present)
                 x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC |
                                ((uint32_t)SPEED_HIGH << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
             continue;
@@ -825,7 +825,7 @@ static void reset(HvXhci *x) {
     memset(x->slots, 0, sizeof x->slots);
     x->kbd_slot = 0;
     x->tab_slot = 0;
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < HV_CD_TRAYS; t++) {
         x->cd_slot[t] = 0;
         hv_usb_cd_reset(&x->cd[t]);
     }
@@ -1155,7 +1155,7 @@ static void run_tray(HvXhci *x, int tray) {
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
     if (x->rhead != x->rtail || x->thead != x->ttail) run_ep_in(x);
-    for (int t = 0; t < 2; t++)
+    for (int t = 0; t < HV_CD_TRAYS; t++)
         if (x->cd_slot[t]) run_tray(x, t);
 }
 
@@ -1165,7 +1165,7 @@ int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
     if (!x || !iso_path) return -1;
     int rc = -1;
     pthread_mutex_lock(&x->mu);
-    for (int t = 0; t < 2 && rc != 0; t++) {
+    for (int t = 0; t < HV_CD_TRAYS && rc != 0; t++) {
         if (x->cd_attached[t]) continue;
         rc = hv_usb_cd_open(&x->cd[t], iso_path);
         if (rc == 0 && x->cd[t].present) {
@@ -1185,7 +1185,7 @@ int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
 void hv_xhci_detach_cd(HvXhci *x) {
     if (!x) return;
     pthread_mutex_lock(&x->mu);
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < HV_CD_TRAYS; t++) {
         hv_usb_cd_close(&x->cd[t]);
         x->cd_attached[t] = 0;
         x->cd_slot[t] = 0;

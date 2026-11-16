@@ -40,6 +40,9 @@
 | 2.2 | 三介质槽 | `HvWinVmConfig` 只有 `disk0`/`disk1`；阶段 2 需要 **系统盘 + PE 盘 + payload 盘** 三块 | 小 | 三块同时出现在 PE 的磁盘管理器 |
 | 2.3 | 启动源选择 | 现在没有"这一阶段从哪块盘启动"的机制 | 小 | 阶段 2 从 PE 起、阶段 3 从系统盘起，全程不需要进 UEFI 菜单 |
 | 2.4 | 触屏在 PE 里能用 | `xhci` 已实现绝对坐标平板（`tab_reports`，6 字节） | 小（验证为主） | PE 里鼠标点得准、能拖动 |
+| 2.5 | **`virtio-gpu` 设备不存在** | 板子上只有 `ramfb`（fw_cfg），没有任何 1AF4:1050。而 `viogpudo.inf` 的 HardwareID 写死 `PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01`——不出现这块设备，Windows **装完也没有显示驱动**，PE 之外就是黑屏 | **+700～900 行**（control queue + 2D 命令 + backing + scanout，走 `fb_metal` 呈现） | 装好的 Windows 里设备管理器出现显示适配器，画面跟着 `fb_metal` 动 |
+
+**2.5 是这个项目目前最硬的一个漏洞**：ramfb 只有 Linux 认，Windows 侧没有任何驱动会绑定它；WinPE 也许靠 UEFI GOP 还能出画面（未验证），但安装完的系统一定要 `virtio-gpu` + `viogpudo`。驱动盘（`tools/make-driver-iso.sh`，2.3 MB）已经把 `viogpudo` 备好了，缺的是**给它一个能绑的设备**。
 
 2.1 的规格已经写成契约：`INSTALL-DESIGN.md` §15（设备类型必须报 5 = CD-ROM、逻辑块 2048、`READ CAPACITY` 返回最后一个 LBA、`MODE SENSE` 报写保护，以及 9 条必须应答的 SCSI 命令）。
 

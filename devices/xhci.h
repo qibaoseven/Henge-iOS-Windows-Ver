@@ -16,7 +16,8 @@
      4 GiB can be read.
    Zero guest drivers required in EDK2 UEFI or Windows 11 ARM64. */
 #define HV_XHCI_SLOTS 8
-#define HV_XHCI_PORTS 4 /* 1 keyboard, 2 tablet, 3 and 4 CD-ROM trays */
+#define HV_XHCI_PORTS 5 /* 1 keyboard, 2 tablet, 3-5 CD-ROM trays */
+#define HV_CD_TRAYS 3
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -61,10 +62,11 @@ typedef struct HvXhci {
     HvXhciSlot slots[HV_XHCI_SLOTS + 1];
     int kbd_slot;
     int tab_slot;
-    /* Two CD trays (ports 3 and 4): setup media and payload media at once. */
-    int cd_slot[2];
-    int cd_attached[2];
-    HvUsbCd cd[2];
+    /* Three CD trays (ports 3, 4 and 5): setup media, payload media and the
+       built-in driver disc, all mounted at once. */
+    int cd_slot[HV_CD_TRAYS];
+    int cd_attached[HV_CD_TRAYS];
+    HvUsbCd cd[HV_CD_TRAYS];
     uint8_t cd_buf[65536]; /* staging for bulk-IN chunks; CPU thread only */
 
     pthread_mutex_t mu;
@@ -92,8 +94,8 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
 void hv_xhci_poll(HvXhci *x);
 
 /* Any thread before the guest boots: put an ISO on the first free CD tray (port
-   3, then 4) as a read-only CD-ROM. Returns 0 on success, or -1 if the image
-   cannot be opened or both trays are full. */
+   3, then 4, then 5) as a read-only CD-ROM. Returns 0 on success, or -1 if the
+   image cannot be opened or the trays are full. */
 int hv_xhci_attach_cd(HvXhci *x, const char *iso_path);
 /* Close both trays (between two boots; the ports stay present but empty). */
 void hv_xhci_detach_cd(HvXhci *x);

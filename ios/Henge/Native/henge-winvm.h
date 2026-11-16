@@ -7,11 +7,11 @@
 #include <stdint.h>
 
 /* Builds the board, attaches the media, and starts the CPUs. Every path is a
-   file inside the app container. cd0 and cd1 may be NULL; a NULL disk0 means an
+   file inside the app container. cd0..cd2 may be NULL; a NULL disk0 means an
    empty machine (only useful for a firmware screen).
    0, or -1 with a reason in err. */
 int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0, const char *cd0, const char *cd1,
-                     uint64_t ram_mb, int ncpus, char *err, size_t errlen);
+                     const char *cd2, uint64_t ram_mb, int ncpus, char *err, size_t errlen);
 
 /* A blank NVMe image, sized the way `df` would report it. Sparse: it costs what
    the guest writes, not what it can see. 0, or -1. Existing files are kept. */
