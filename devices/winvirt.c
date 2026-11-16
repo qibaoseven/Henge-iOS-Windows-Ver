@@ -244,3 +244,12 @@ void hv_winvirt_power_button(HvWinVirt *b) {
     __atomic_fetch_or(&b->ged_events, 0x2U, __ATOMIC_ACQ_REL);
     hv_gicv3_pend(b->gic, WINVIRT_INTID_GED);
 }
+
+/* --- optional CD media -------------------------------------------------------
+   Port 3 of the xHCI is a USB CD-ROM. Nothing else in the machine needs to know
+   about it: the firmware finds it during enumeration and boots from it via El
+   Torito, and Windows binds cdfs.sys to it because INQUIRY says type 5. */
+int hv_winvirt_attach_cd(HvWinVirt *b, const char *iso_path) {
+    if (!b || !b->usb) return -1;
+    return hv_xhci_attach_cd(b->usb, iso_path);
+}

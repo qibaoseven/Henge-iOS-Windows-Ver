@@ -5,15 +5,25 @@
 
 #include "pcie.h"
 
+#include "usb_storage.h"
+
 /* xHCI 1.0 USB host controller (MSI-X + INTx) with:
    - Port 1: USB HID Boot Keyboard
    - Port 2: USB HID Absolute Tablet (0..32767 X/Y, L/R/M buttons, scroll wheel)
+   - Port 3: USB Mass Storage CD-ROM (Bulk-Only Transport), attached on demand.
+     It reports INQUIRY peripheral device type 5, which is the only way Windows
+     binds cdfs.sys and therefore the only way an install image larger than
+     4 GiB can be read.
    Zero guest drivers required in EDK2 UEFI or Windows 11 ARM64. */
 #define HV_XHCI_SLOTS 8
-#define HV_XHCI_PORTS 2
+#define HV_XHCI_PORTS 3
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
+
+/* Bulk endpoint data channel indices for the CD (EP1 OUT = 2, EP1 IN = 3). */
+#define HV_CD_DCI_OUT 2
+#define HV_CD_DCI_IN 3
 
 typedef struct HvXhciRing {
     uint64_t dequeue; /* guest PA of the next TRB */
@@ -51,6 +61,10 @@ typedef struct HvXhci {
     HvXhciSlot slots[HV_XHCI_SLOTS + 1];
     int kbd_slot;
     int tab_slot;
+    int cd_slot;
+    int cd_attached;
+    HvUsbCd cd;
+    uint8_t cd_buf[65536]; /* staging for bulk-IN chunks; CPU thread only */
 
     pthread_mutex_t mu;
     /* Port 1 keyboard reports (8 bytes each) */
@@ -72,7 +86,12 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down);
 /* Any thread: USB HID Absolute Tablet event (x, y in 0..32767; buttons bit0=L, bit1=R, bit2=M; wheel -127..127). */
 void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t wheel);
-/* CPU thread: hand waiting keyboard & tablet reports to the guest. */
+/* CPU thread: hand waiting keyboard & tablet reports to the guest, and move any
+   outstanding CD bulk transfers. */
 void hv_xhci_poll(HvXhci *x);
+
+/* Any thread before the guest boots: put an ISO on port 3 as a read-only CD-ROM.
+   Returns 0 on success, or -1 if the image cannot be opened. */
+int hv_xhci_attach_cd(HvXhci *x, const char *iso_path);
 
 #endif

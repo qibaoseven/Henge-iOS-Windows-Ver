@@ -12,6 +12,8 @@ typedef struct HvWinVmConfig {
     const char *vars_fd;      /* 64 MB UEFI NVRAM (read/write persistent) */
     const char *disk0;        /* Primary NVMe disk image (raw or .hvsparse) */
     const char *disk1;        /* Optional secondary/installer NVMe disk image (read-only) */
+    const char *cd0;          /* Optional ISO attached as USB CD-ROM (setup media) */
+    const char *cd1;          /* Optional second ISO (payload media: install.wim/esd) */
     const char *share_dir;    /* Optional host folder shared over WebDAV at http://10.0.2.4/ */
     const char *share_sock;   /* Path for internal WebDAV Unix domain socket */
     int ncpus;

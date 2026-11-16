@@ -198,6 +198,16 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
                           d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
+    /* ISO media: xHCI port 3 is a read-only CD-ROM. Attached here, before the CPU
+       starts, so the firmware's enumeration already sees the trays closed. */
+    if (c->cd0 && *c->cd0) {
+        if (hv_winvirt_attach_cd(&board, c->cd0) != 0)
+            return fail(err, errlen, "Cannot open the first CD-ROM image.");
+    }
+    if (c->cd1 && *c->cd1) {
+        if (hv_winvirt_attach_cd(&board, c->cd1) != 0)
+            return fail(err, errlen, "Cannot open the second CD-ROM image.");
+    }
     hv_winvirt_reset_cpu(&board);
 
     share_on = 0;
@@ -309,7 +319,17 @@ int hv_winvm_run_cpu0(void) {
                 board.flash1->status = 0x80;
             }
             if (board.fb) board.fb->active = 0;
-            hv_winvirt_reset_cpu(&board);
+            /* ISO media: xHCI port 3 is a read-only CD-ROM. Attached here, before the CPU
+       starts, so the firmware's enumeration already sees the trays closed. */
+    if (c->cd0 && *c->cd0) {
+        if (hv_winvirt_attach_cd(&board, c->cd0) != 0)
+            return fail(err, errlen, "Cannot open the first CD-ROM image.");
+    }
+    if (c->cd1 && *c->cd1) {
+        if (hv_winvirt_attach_cd(&board, c->cd1) != 0)
+            return fail(err, errlen, "Cannot open the second CD-ROM image.");
+    }
+    hv_winvirt_reset_cpu(&board);
             m.flush_pending = 1;
             spawn_secondaries();
             continue;

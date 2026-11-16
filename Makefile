@@ -12,7 +12,7 @@ HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 WINDEV = $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/pl061.o $(B)/pcie.o \
          $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o \
          $(B)/xhci.o $(B)/acpi.o $(B)/nvme.o $(B)/hda.o $(B)/fdt.o $(B)/fw_cfg.o $(B)/pflash.o \
-         $(B)/winvirt.o $(B)/fb_display.o
+         $(B)/winvirt.o $(B)/fb_display.o $(B)/usb_storage.o
 # The macOS guest build ("Henge" the app) still ships the Apple GPU path, which
 # the Windows direction does not use.
 DEV = $(WINDEV) $(B)/pvg_metal.o $(B)/pvg_mac.o $(B)/fb_metal.o
@@ -20,7 +20,7 @@ ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown $(B)/test_usb_storage
 
 # `hengevm` / `hengevm-ref` were the macOS-guest binaries (host/main.c, vm.c,
 # hvf_ref.c); those sources went away with the Windows direction, so they are
@@ -132,6 +132,10 @@ $(B)/test_devices: tests/test_devices.c tests/devices_programs.S tests/harness.S
 	$(CC) $(CFLAGS) -Itests tests/test_devices.c tests/devices_programs.S tests/harness.S $(ENGINE) $(DEV) $(METAL_LIBS) -o $@
 $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $(ENGINE)
 	$(CC) $(CFLAGS) -Itests tests/test_$*.c tests/$*_programs.S tests/harness.S $(ENGINE) -o $@
+
+# The USB CD's SCSI layer, with no machine attached: runs on any host.
+$(B)/test_usb_storage: tests/test_usb_storage.c $(B)/usb_storage.o | $(B)
+	$(CC) $(CFLAGS) tests/test_usb_storage.c $(B)/usb_storage.o -lpthread -o $@
 
 test: all
 	@ulimit -s 65520; for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done # a test keeps a whole HvCpu (2 MB of TLB and more) on its stack

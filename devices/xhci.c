@@ -124,6 +124,23 @@ static const uint8_t tab_config_desc[34] = {
     7, 5, 0x81, 3, 8, 0, 1,                                       /* EP1 IN, 8 bytes max, 1 ms */
 };
 
+/* Mass storage interface: SCSI transparent command set, Bulk-Only Transport.
+   Two bulk endpoints, 512-byte packets (high speed). */
+static const uint8_t cd_device_desc[18] = {
+    18, 1, 0x00, 0x02, 0x00, 0x00, 0x00, 64,
+    0x48, 0x47, /* idVendor  "HG" */
+    0x01, 0x00, /* idProduct */
+    0x01, 0x01, /* bcdDevice 1.01 */
+    1, 2, 3     /* strings: manufacturer, product, serial */
+};
+static const uint8_t cd_config_desc[32] = {
+    9, 2, 32, 0, 1, 1, 0, 0x80, 50,                       /* configuration */
+    9, 4, 0, 0, 2, 0x08, 0x06, 0x50, 0,                   /* interface: mass storage, SCSI, BOT */
+    7, 5, 0x01, 0x02, 0x00, 0x02, 0x00,                /* EP1 OUT, bulk, 512 */
+    7, 5, 0x81, 0x02, 0x00, 0x02, 0x00                 /* EP1 IN,  bulk, 512 */
+};
+static const char *const cd_strings[] = {"Henge", "Virtual CD-ROM", "HENGE0001"};
+
 static const char *const strings[] = {
     NULL,
     "WindowsiOS",
@@ -264,7 +281,10 @@ static void set_ep_state(HvXhci *x, int slot, int dci, uint32_t state) {
 
 /* ---- control requests for Port 1 (Keyboard) and Port 2 (Tablet) ---- */
 
+static int cd_control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max);
+
 static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max) {
+    if (sl->port == 3) return cd_control(x, sl, setup, out, max);
     int is_tab = sl->port == 2;
     uint8_t type = setup[0], req = setup[1];
     uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
@@ -333,6 +353,69 @@ static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *o
         return -1;
     }
     if (len > max) len = max;
+    memcpy(out, src, (size_t)len);
+    return len;
+}
+
+static int cd_control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max) {
+    uint8_t type = setup[0], req = setup[1];
+    uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
+    uint16_t wlen = (uint16_t)(setup[6] | setup[7] << 8);
+    if (xlog())
+        fprintf(stderr, "xhci cd: request %02x %02x value %04x len %u\n", type, req, value, wlen);
+
+    const uint8_t *src = NULL;
+    int len = 0;
+    uint8_t tmp[64];
+
+    if (type == 0x80 && req == 6) { /* GET_DESCRIPTOR */
+        uint8_t dt = (uint8_t)(value >> 8), idx = (uint8_t)(value & 0xff);
+        if (dt == 1) src = cd_device_desc, len = sizeof cd_device_desc;
+        else if (dt == 2) src = cd_config_desc, len = sizeof cd_config_desc;
+        else if (dt == 3) {
+            if (idx == 0) {
+                tmp[0] = 4, tmp[1] = 3, tmp[2] = 0x09, tmp[3] = 0x04;
+                src = tmp, len = 4;
+            } else if (idx <= sizeof cd_strings / sizeof cd_strings[0]) {
+                const char *str = cd_strings[idx - 1];
+                int n = (int)strlen(str);
+                if (n > 30) n = 30;
+                tmp[0] = (uint8_t)(2 + 2 * n), tmp[1] = 3;
+                for (int i = 0; i < n; i++) tmp[2 + 2 * i] = (uint8_t)str[i], tmp[3 + 2 * i] = 0;
+                src = tmp, len = 2 + 2 * n;
+            } else {
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+    } else if (type == 0xa1 && req == 0xfe) { /* GET_MAX_LUN (class, interface) */
+        tmp[0] = 0;                            /* one LUN, number 0 */
+        src = tmp, len = 1;
+    } else if (type == 0x21 && req == 0xff) { /* Bulk-Only Mass Storage Reset */
+        hv_usb_cd_reset(&x->cd);
+        return 0;
+    } else if (type == 0x00 && req == 9) { /* SET_CONFIGURATION */
+        sl->configured = value & 0xff;
+        return 0;
+    } else if (type == 0x80 && req == 8) { /* GET_CONFIGURATION */
+        tmp[0] = (uint8_t)sl->configured;
+        src = tmp, len = 1;
+    } else if ((type == 0x80 || type == 0x81 || type == 0x82) && req == 0) { /* GET_STATUS */
+        tmp[0] = 0, tmp[1] = 0;
+        src = tmp, len = 2;
+    } else if (type == 0x81 && req == 0x0a) { /* GET_INTERFACE */
+        tmp[0] = 0;
+        src = tmp, len = 1;
+    } else if (type == 0x01 && req == 0x0b) { /* SET_INTERFACE */
+        return 0;
+    } else if (type == 0x02 && (req == 1 || req == 3)) { /* CLEAR/SET_FEATURE (endpoint halt) */
+        return 0;
+    } else {
+        return -1;
+    }
+    if (len > max) len = max;
+    if (len > (int)wlen) len = (int)wlen; /* never send more than the host asked for */
     memcpy(out, src, (size_t)len);
     return len;
 }
@@ -534,6 +617,10 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     x->slots[slot].idle = 0;
     if (port == 1) x->kbd_slot = slot;
     else if (port == 2) x->tab_slot = slot;
+    else if (port == 3) {
+        x->cd_slot = slot;
+        hv_usb_cd_reset(&x->cd); /* a new device gets a clean transport state */
+    }
     init_ring_from_ctx(x, slot, 1);
     return CC_SUCCESS;
 }
@@ -603,6 +690,7 @@ static void run_commands(HvXhci *x) {
             if (slot >= 1 && slot <= HV_XHCI_SLOTS) {
                 if (slot == x->kbd_slot) x->kbd_slot = 0;
                 if (slot == x->tab_slot) x->tab_slot = 0;
+                if (slot == x->cd_slot) x->cd_slot = 0;
                 memset(&x->slots[slot], 0, sizeof x->slots[slot]);
             }
             break;
@@ -686,6 +774,14 @@ static void run_commands(HvXhci *x) {
 
 static void ports_connect_init(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
+        if (p == 2) {
+            /* Port 3 (the CD) only shows a device once an image is attached. */
+            x->portsc[p] = PORT_PP;
+            if (x->cd_attached && x->cd.present)
+                x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC |
+                               ((uint32_t)SPEED_HIGH << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+            continue;
+        }
         x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | ((uint32_t)SPEED_FULL << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
     }
 }
@@ -727,6 +823,8 @@ static void reset(HvXhci *x) {
     memset(x->slots, 0, sizeof x->slots);
     x->kbd_slot = 0;
     x->tab_slot = 0;
+    x->cd_slot = 0;
+    hv_usb_cd_reset(&x->cd);
     ports_connect_init(x);
     update_irq(x);
 }
@@ -974,9 +1072,101 @@ void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
     if (code < 256) hv_xhci_key(x, linux_to_hid[code], down);
 }
 
+/* ---- port 3: bulk endpoints of the CD ---- */
+
+static void run_cd(HvXhci *x) {
+    int slot = x->cd_slot;
+    if (!slot) return;
+    HvXhciSlot *sl = &x->slots[slot];
+    if (!sl->used) return;
+
+    /* Bulk OUT carries exactly one CBW per command. */
+    if (sl->ep_running[HV_CD_DCI_OUT]) {
+        HvXhciRing *r = &sl->ep[HV_CD_DCI_OUT];
+        uint32_t trb[4];
+        uint64_t at;
+        while (ring_peek(x, r, trb, &at)) {
+            int type = (trb[3] >> 10) & 0x3f;
+            int ioc = (trb[3] >> 5) & 1;
+            if (type != TRB_NORMAL) {
+                ring_advance(r);
+                if (ioc) transfer_event(x, at, CC_SUCCESS, 0, slot, HV_CD_DCI_OUT);
+                continue;
+            }
+            uint64_t buf = (uint64_t)trb[1] << 32 | trb[0];
+            uint32_t want = trb[2] & 0x1ffff;
+            int cc = CC_SUCCESS;
+            uint32_t resid = 0;
+            if (want < 31u) {
+                cc = CC_STALL; /* a CBW is 31 bytes; anything shorter is a protocol error */
+                resid = want;
+            } else {
+                uint8_t cbw[31];
+                rd(x, buf, cbw, sizeof cbw);
+                hv_usb_cd_cbw(&x->cd, cbw);
+            }
+            ring_advance(r);
+            if (ioc || cc == CC_STALL) transfer_event(x, at, cc, resid, slot, HV_CD_DCI_OUT);
+        }
+    }
+
+    /* Bulk IN carries the data phase and then the CSW, in however many transfers
+       the host chooses to split it. */
+    if (sl->ep_running[HV_CD_DCI_IN]) {
+        HvXhciRing *r = &sl->ep[HV_CD_DCI_IN];
+        uint32_t trb[4];
+        uint64_t at;
+        while (ring_peek(x, r, trb, &at)) {
+            int type = (trb[3] >> 10) & 0x3f;
+            int ioc = (trb[3] >> 5) & 1;
+            int ch = (trb[3] >> 4) & 1;
+            if (type != TRB_NORMAL) {
+                ring_advance(r);
+                if (ioc) transfer_event(x, at, CC_SUCCESS, 0, slot, HV_CD_DCI_IN);
+                continue;
+            }
+            uint64_t buf = (uint64_t)trb[1] << 32 | trb[0];
+            uint32_t want = trb[2] & 0x1ffff;
+            uint32_t done = 0;
+            int is_csw = 0;
+            while (done < want) {
+                uint32_t chunk = want - done;
+                if (chunk > sizeof x->cd_buf) chunk = sizeof x->cd_buf;
+                uint32_t n = hv_usb_cd_read_in(&x->cd, x->cd_buf, chunk, &is_csw);
+                if (n == 0 && !is_csw) break;
+                wr(x, buf + done, x->cd_buf, n);
+                done += n;
+                if (is_csw) break;
+            }
+            ring_advance(r);
+            int short_pkt = done < want;
+            if (ioc || short_pkt)
+                transfer_event(x, at, short_pkt ? CC_SHORT_PACKET : CC_SUCCESS, want - done, slot, HV_CD_DCI_IN);
+            if (!ch) return;
+        }
+    }
+}
+
 void hv_xhci_poll(HvXhci *x) {
-    if (!x || (x->rhead == x->rtail && x->thead == x->ttail)) return;
-    run_ep_in(x);
+    if (!x) return;
+    if (x->rhead != x->rtail || x->thead != x->ttail) run_ep_in(x);
+    if (x->cd_slot) run_cd(x);
+}
+
+/* Attach an image as the CD. Called before the guest starts, so the port status
+   is already correct when the firmware enumerates the bus. */
+int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
+    if (!x || !iso_path) return -1;
+    pthread_mutex_lock(&x->mu);
+    int rc = hv_usb_cd_open(&x->cd, iso_path);
+    x->cd_attached = rc == 0 && x->cd.present;
+    if (x->cd_attached)
+        x->portsc[2] = PORT_PP | PORT_CCS | PORT_CSC |
+                       ((uint32_t)SPEED_HIGH << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+    else
+        x->portsc[2] = PORT_PP;
+    pthread_mutex_unlock(&x->mu);
+    return rc;
 }
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
