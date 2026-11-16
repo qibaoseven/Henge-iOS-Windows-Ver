@@ -6,27 +6,28 @@
 
 #include "machine.h"
 
-/* GICv3 with one security state (DS=1): the distributor, one redistributor per
-   CPU, and each CPU's ICC_* system registers. INTIDs 0-15 are SGIs, 16-31 PPIs
-   (both banked per CPU), 32 and up SPIs.
-
-   LPIs (from the ITS) are carried in the same tables as SPIs, above the last
-   SPI: they are level-like, route to one CPU, and are pended by writing a bit,
-   which is exactly what an SPI is here. HV_GIC_NUM_IRQS therefore covers
-   HV_GIC_LPI_BASE + HV_GIC_LPI_COUNT. */
+/* GICv3 with one security state (DS=1), no LPIs or ITS: the distributor, one
+   redistributor per CPU, and each CPU's ICC_* system registers. INTIDs 0-15
+   are SGIs, 16-31 PPIs (both banked per CPU), 32 and up SPIs. */
+#define HV_GIC_NUM_IRQS (256 + 32) /* vmapple / virt: 256 SPIs */
 #define HV_GIC_LPI_BASE 8192
-#define HV_GIC_LPI_COUNT 256
-#define HV_GIC_NUM_IRQS (HV_GIC_LPI_BASE + HV_GIC_LPI_COUNT)
+#define HV_GIC_MAX_LPIS 4096
+
+typedef struct HvGicIts HvGicIts;
 
 typedef struct HvGicActive {
     uint16_t intid;
     uint8_t prio, group;
 } HvGicActive;
 
-/* One CPU's redistributor (its SGIs and PPIs) and CPU interface. */
+/* One CPU's redistributor (its SGIs, PPIs, and LPIs) and CPU interface. */
 typedef struct HvGicCpu {
     uint8_t group[32], grpmod[32], enabled[32], latch[32], level[32], active[32], priority[32], edge[32];
+    uint32_t gicr_ctlr;          /* bit 0: EnableLPIs */
     uint32_t waker;
+    uint64_t propbaser;          /* GICR_PROPBASER */
+    uint64_t pendbaser;          /* GICR_PENDBASER */
+    uint64_t lpi_pending[HV_GIC_MAX_LPIS / 64];
     uint64_t pmr, bpr0, bpr1, icc_ctlr, igrpen0, igrpen1, sre;
     uint64_t ap0r, ap1r;         /* active priority bits, one per priority level >> 3 */
     HvGicActive stack[32];       /* acknowledged, not yet priority-dropped */
@@ -52,14 +53,18 @@ typedef struct HvGic {
 } HvGic;
 
 HvGic *hv_gicv3_create(HvMachine *m, uint64_t dist_pa, uint64_t redist_pa);
+/* Optional GICv2m MSI frame (64 KB at pa, e.g. 0x08080000 on virt) for MSI/MSI-X without ITS. */
+void hv_gicv2m_create(HvMachine *m, HvGic *g, uint64_t pa, int spi_base, int num_spi);
+/* GICv3 Interrupt Translation Service (128 KB at pa, e.g. 0x08080000 on virt) for LPI MSI/MSI-X. */
+HvGicIts *hv_gicv3_its_create(HvMachine *m, HvGic *g, uint64_t pa);
+void hv_gicv3_its_msi(HvGicIts *its, uint32_t devid, uint32_t eventid);
+void hv_gicv3_its_reset(HvGicIts *its);
 /* Drive an SPI's input line (32+). */
 void hv_gicv3_set_irq(HvGic *g, int intid, int level);
 /* Drive one CPU's PPI (16-31). */
 void hv_gicv3_set_ppi(HvGic *g, int cpu, int intid, int level);
 /* Make an SPI pending, as an MSI write does. */
 void hv_gicv3_pend(HvGic *g, int intid);
-/* Pend an INTID on one CPU, whatever kind it is: the ITS delivers LPIs this way. */
-void hv_gicv3_pend_cpu(HvGic *g, int intid, int cpu);
 /* Recompute every CPU's IRQ and FIQ inputs (waking any that just got one). */
 void hv_gicv3_update(HvGic *g);
 

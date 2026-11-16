@@ -173,6 +173,12 @@ typedef struct HvCpu {
        ASID to more than one address space, and may follow a switch between them with a whole-TLB flush rather than one
        by ASID) gets a fresh id, as the TLB stashes are keyed by the whole TTBR0. */
     uint64_t asid_base[65536];
+    /* Windows 11 ARM64's KiSwapProcess passes through ASID 0 with a transient
+       TTBR0 before binding the real one. Changing TTBR0 under ASID 0 must not
+       be read as "a new address space": only a real user fill (asid0_used)
+       makes the ASID-0 id stale, and these two record that. */
+    uint64_t asid0_ttbr0; /* TTBR0 last seen under ASID 0 */
+    int asid0_used;       /* a user IJC entry was filled under ASID 0 since */
     uint32_t next_cid, kernel_gen;
     uint64_t ttbr0_changed_at; /* --stats: host time of the last TTBR0 change */
 

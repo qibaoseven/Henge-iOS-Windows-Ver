@@ -50,6 +50,8 @@ HvVirtioNet *hv_virtio_net_create(HvMachine *m, HvPcie *bus, const uint8_t mac[6
     HvVirtioNet *n = calloc(1, sizeof *n);
     HvVirtio *v = &n->vio;
     hv_virtio_init(v, m, 1, 0x020000, 2, F_MAC | F_STATUS);
+    v->pci.config[0x2e] = 0x00; /* SUBSYS_11001AF4: exact primary hardware ID in Red Hat WHQL netkvm.inf */
+    v->pci.config[0x2f] = 0x11;
     v->dev = n;
     v->notify = notify;
     memcpy(v->config, mac, 6);

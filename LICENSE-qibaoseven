@@ -1,0 +1,58 @@
+Henge — additional copyright and modification notice
+====================================================
+
+Upstream work
+-------------
+Henge, as originally published by its upstream author:
+
+    Copyright (C) the Henge authors (Leviidev and contributors)
+    Licensed under the GNU General Public License, version 2 or later.
+    See LICENSE in this directory for the full licence text.
+    Upstream project: https://github.com/Leviidev/Henge
+
+The original copyright notices and the GPL-2.0-or-later licence are kept
+unchanged. Nothing in this file narrows, replaces or supersedes them.
+
+
+Modifications by qibaoseven
+---------------------------
+    Copyright (C) 2026 qibaoseven
+
+The following parts of this work contain modifications made by qibaoseven:
+
+    core/      memory, MMU/TLB, sysreg and CPU handling
+    devices/   PCIe, virtio, GICv3/ITS, ACPI tables, fw_cfg, pflash
+    host/      build and host support
+    tests/     test suite
+    tools/     helper scripts
+    compat/    build-and-test scripts
+    docs/      notes for the Windows-on-ARM64 direction
+
+These modifications are derived from the upstream work and are therefore
+distributed under the same licence as the upstream project:
+
+    GNU General Public License, version 2 or later (GPL-2.0-or-later)
+
+This Program is free software; you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation; either version 2 of the License, or (at your option)
+any later version.
+
+This Program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+more details.
+
+You should have received a copy of the GNU General Public License along
+with this Program; if not, write to the Free Software Foundation, Inc.,
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+
+Third-party components
+----------------------
+Third-party code under third_party/ and ios/Henge/Resources/legal/ keeps its
+own licence and copyright, as listed in docs/licensing.md and
+THIRD_PARTY_NOTICES.md. Those notices remain in force.
+
+macOS and the boot ROM (AVPBooter.vmapple2.bin) are Apple's, are not part of
+this source tree, and are not covered by any licence stated above.

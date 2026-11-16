@@ -111,10 +111,11 @@ int main(void) {
         check("sysregs", "NZCV", c.x[7], 0x60000000);
         check("sysregs", "CNTVCT advances", c.x[9] > c.x[8], 1);
         check("sysregs", "CNTFRQ", c.x[10], 24000000);
+        check("sysregs", "4K granule advertised", (c.x[11] >> 28) & 0xf, 0);
         check("sysregs", "16K granule advertised", (c.x[11] >> 20) & 0xf, 1);
         check("sysregs", "SP_EL0 via SPSel", c.x[12], 0);
         check("sysregs", "SP_EL1 via SPSel", c.x[13], sp1);
-        check("sysregs", "MIDR implementer", c.x[14] >> 24, 0x61);
+        check("sysregs", "MIDR implementer", c.x[14] >> 24, 0x41);
         check("sysregs", "FPCR", c.x[17], 1u << 24);
         check("sysregs", "VBAR", c.x[18], c.vbar_el1);
         check("sysregs", "CNTV_CVAL", c.x[21], 0x123);

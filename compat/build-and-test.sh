@@ -20,6 +20,19 @@ CC=${CC:-cc}
 # -latomic: memop.c does a 128-bit compare-and-exchange (CASP).
 CFLAGS="-std=c11 -O1 -w -D_GNU_SOURCE -Icompat/shadow -Icompat -Icore -Ihost -Idevices -Itests -include compat/henge_pthread.h -include compat/henge_ulock.h"
 
+# The network backend is libslirp. Upstream 4.8 (Alpine/Debian) uses int fds and
+# slirp_pollfds_fill(); the iOS build uses sockets. HV_HAVE_SLIRP disappears when
+# the library is absent, and the machine builds without a NIC backend then.
+SLIRP_CFLAGS=""
+SLIRP_LIBS=""
+if pkg-config --exists slirp 2>/dev/null; then
+    SLIRP_CFLAGS="$(pkg-config --cflags slirp) -DSLIRP_FD_INT -DHV_HAVE_SLIRP"
+    SLIRP_LIBS="$(pkg-config --libs slirp)"
+    echo "== libslirp $(pkg-config --modversion slirp): the NIC gets a NAT backend"
+else
+    echo "== libslirp not installed (apk add libslirp-dev): the NIC will have no backend"
+fi
+
 mkdir -p "$OUT"
 
 echo "== compiling the engine"
@@ -28,12 +41,15 @@ for f in classify operands translate dispatch memop exception sysreg machine; do
 done
 # The virt machine's pieces, which the Windows direction needs and which build
 # without a JIT: their test drives the device callbacks through the MMIO map.
-for f in pflash fw_cfg virt dtb its gicv3 pl011 pl031 pl061 pcie virtio virtio_blk virtio_net timer acpi disk; do
+for f in pflash fw_cfg winvirt fdt gicv3 pl011 pl031 pl061 pcie virtio virtio_blk virtio_net virtio_input virtio_snd timer acpi disk nvme xhci hda fb_display; do
     # host/disk.c is not a device, but virtio-blk needs its file API and it
     # compiles without a Mac (it is open/pread/pwrite).
     if [ "$f" = disk ]; then src=host/disk.c; else src=devices/$f.c; fi
-    $CC $CFLAGS -Idevices -Ihost -c "$src" -o "$OUT/dev_$f.o"
+    $CC $CFLAGS $SLIRP_CFLAGS -Idevices -Ihost -c "$src" -o "$OUT/dev_$f.o"
 done
+if [ -n "$SLIRP_LIBS" ]; then
+    $CC $CFLAGS $SLIRP_CFLAGS -Idevices -Ihost -c host/net_slirp.c -o "$OUT/dev_net_slirp.o"
+fi
 # mmu.c must not use SIMD: hv_tlb_refill runs with the guest's vectors live.
 $CC $CFLAGS -mgeneral-regs-only -c core/mmu.c -o "$OUT/mmu.o"
 $CC $CFLAGS -c host/jit_region.c -o "$OUT/jit_region.o"
@@ -54,21 +70,21 @@ rm -f "$OUT/enter.raw.o"
 OBJS=$(ls "$OUT"/*.o | grep -v '/enter\.o$' | tr '\n' ' ')
 
 echo "== test_mmu"
-$CC $CFLAGS tests/test_mmu.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_mmu"
+$CC $CFLAGS tests/test_mmu.c $OBJS "$OUT/enter.o" -latomic $SLIRP_LIBS -lpthread -o "$OUT/test_mmu"
 # A test keeps a whole HvCpu (2 MB of TLB and more) on its stack.
 ulimit -s 65520 2>/dev/null || true
 "$OUT/test_mmu"
 
 echo "== test_virt"
-$CC $CFLAGS -Idevices tests/test_virt.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_virt"
+$CC $CFLAGS $SLIRP_CFLAGS -Idevices tests/test_virt.c $OBJS "$OUT/enter.o" -latomic $SLIRP_LIBS -lpthread -o "$OUT/test_virt"
 "$OUT/test_virt"
 
 echo "== test_pcie"
-$CC $CFLAGS -Idevices tests/test_pcie.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_pcie"
+$CC $CFLAGS -Idevices tests/test_pcie.c $OBJS "$OUT/enter.o" -latomic $SLIRP_LIBS -lpthread -o "$OUT/test_pcie"
 "$OUT/test_pcie"
 
 echo "== test_dtb"
-$CC $CFLAGS -Idevices tests/test_dtb.c $OBJS "$OUT/enter.o" -latomic -o "$OUT/test_dtb"
+$CC $CFLAGS -Idevices tests/test_dtb.c $OBJS "$OUT/enter.o" -latomic $SLIRP_LIBS -lpthread -o "$OUT/test_dtb"
 "$OUT/test_dtb"
 
 echo "== test_acpi"

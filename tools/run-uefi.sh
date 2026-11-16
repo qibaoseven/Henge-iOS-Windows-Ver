@@ -39,7 +39,8 @@ needs_build=0
 [ -x "$BIN" ] || needs_build=1
 for f in core/classify core/operands core/translate core/dispatch core/memop core/exception core/sysreg core/machine \
          devices/pflash devices/fw_cfg devices/virt devices/dtb devices/its devices/gicv3 devices/pl011 devices/pl031 \
-         devices/pl061 devices/pcie devices/timer host/jit_region host/main_uefi; do
+         devices/pl061 devices/pcie devices/virtio devices/virtio_blk devices/virtio_net devices/acpi devices/timer \
+         host/disk host/jit_region host/main_uefi; do
     o=build/posix/vb_$(basename "$f").o
     OBJS="$OBJS $o"
     if [ ! -f "$o" ] || [ "$f.c" -nt "$o" ] || [ -n "$(find core devices host -name '*.h' -newer "$o" 2>/dev/null | head -1)" ]; then

@@ -7,6 +7,7 @@ the App Store.
 | Code | Licence | Where |
 | --- | --- | --- |
 | Henge | GPL-2.0-or-later | `core/`, `devices/`, `host/`, `ios/`, `tools/` |
+| Modifications by qibaoseven | GPL-2.0-or-later | `core/`, `devices/`, `host/`, `tests/`, `tools/`, `compat/`, `docs/` — see [LICENSE-qibaoseven](../LICENSE-qibaoseven) |
 | Code from Husk | GPL-2.0-or-later | `ios/Henge/JIT/`, `HengeLog.swift`, `Native/henge-ios-jit.*`, `henge-brk.S`, `HengeJITHelper/` |
 | QEMU's vmapple AES device, as a reference | GPL-2.0-or-later | `devices/aes.c` |
 | QEMU's `tcg-apple-jit.h` | LGPL-2.1-or-later | `ios/Henge/Native/` |
@@ -25,6 +26,16 @@ the App Store.
 idevicerestore's `COPYING` file is LGPL-3.0, while its source headers say LGPL-2.1
 or later. If the `COPYING` file governs, the combined binary is GPL-3.0, which
 GPL-2.0-or-later allows.
+
+## Modifications
+
+This tree is a modified version of upstream Henge. Changes made by **qibaoseven**
+(core memory/MMU/TLB, PCIe and virtio with MSI-X, GICv3 and ITS, the ACPI tables,
+fw_cfg and pflash, the test suite and the build scripts) are also licensed
+GPL-2.0-or-later, the same terms as the upstream project. The upstream copyright
+and `LICENSE` are untouched; the additional notice lives in
+[LICENSE-qibaoseven](../LICENSE-qibaoseven). Distributing a binary built from this
+tree therefore still means meeting GPL-2.0-or-later in full.
 
 ## Not covered
 

@@ -9,7 +9,15 @@
 
    Locks are accepted but not enforced: macOS only writes to a server that offers them, and there is one client. */
 #include "share.h"
+#include "net_slirp.h"
 
+#include <TargetConditionals.h>
+#ifndef __APPLE__
+/* Linux's struct stat names these differently (and has no birth time). */
+#define st_mtimespec st_mtim
+#define st_birthtimespec st_ctim
+#define f_mntfromname f_mntfromname_compat /* unused below: see the statfs block */
+#endif
 #include <copyfile.h>
 #include <dirent.h>
 #include <errno.h>
@@ -23,6 +31,14 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/mount.h>
+#ifndef __APPLE__
+#include <sys/statfs.h>
+/* Darwin's per-socket "do not raise SIGPIPE". Linux leaves it to the process,
+   which the runner already does (SIGPIPE ignored): 0 is setsockopt's "off". */
+#ifndef SO_NOSIGPIPE
+#define SO_NOSIGPIPE 0
+#endif
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -44,7 +60,59 @@ static pthread_cond_t clip_cond = PTHREAD_COND_INITIALIZER;
 static char *device_clip; /* the device's, for the guest */
 static unsigned long device_seq;
 static char *guest_clip; /* the guest's, until the device takes it */
+static char *guest_open_url;
+static char *last_oauth_url;
+static time_t last_oauth_seen;
+static int guest_oauth_done;
+static int url_handler_enabled = -1;
 static time_t agent_seen;
+
+static int is_url_handler_on(void) {
+    if (url_handler_enabled < 0) {
+#if TARGET_OS_IPHONE
+        url_handler_enabled = 1;
+#else
+        url_handler_enabled = getenv("HV_OAUTH_BRIDGE") != NULL ? 1 : 0;
+#endif
+    }
+    return url_handler_enabled;
+}
+
+void hv_share_set_url_handler_enabled(int enabled) {
+    pthread_mutex_lock(&clip_mu);
+    int prev = is_url_handler_on();
+    url_handler_enabled = enabled ? 1 : 0;
+    /* If user just switched OAuth: Edge -> OAuth: Safari while an OAuth login is in flight, pop SafariSheet immediately */
+    if (!prev && url_handler_enabled && !guest_open_url && last_oauth_url &&
+        (time(NULL) - last_oauth_seen) <= 300) {
+        guest_open_url = last_oauth_url;
+        last_oauth_url = NULL;
+    }
+    pthread_mutex_unlock(&clip_mu);
+}
+
+int hv_share_url_handler_enabled(void) {
+    pthread_mutex_lock(&clip_mu);
+    int v = is_url_handler_on();
+    pthread_mutex_unlock(&clip_mu);
+    return v;
+}
+
+char *hv_share_take_open_url(void) {
+    pthread_mutex_lock(&clip_mu);
+    char *url = guest_open_url;
+    guest_open_url = NULL;
+    pthread_mutex_unlock(&clip_mu);
+    return url;
+}
+
+int hv_share_take_oauth_done(void) {
+    pthread_mutex_lock(&clip_mu);
+    int done = guest_oauth_done;
+    guest_oauth_done = 0;
+    pthread_mutex_unlock(&clip_mu);
+    return done;
+}
 
 void hv_share_set_clipboard(const char *text) {
     pthread_mutex_lock(&clip_mu);
@@ -331,8 +399,13 @@ static void add_entry(Text *t, const char *url_path, const char *name, const str
     adds(t, "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>"
             "<D:lockdiscovery/>");
     if (is_root) {
+#ifdef __APPLE__
         struct statfs fs;
         if (statfs(root, &fs) == 0) {
+#else
+        struct statfs fs;
+        if (statfs(root, &fs) == 0) {
+#endif
             addf(t, "<D:quota-available-bytes>%llu</D:quota-available-bytes><D:quota-used-bytes>%llu</D:quota-used-bytes>",
                  (unsigned long long)fs.f_bavail * fs.f_bsize, (unsigned long long)(fs.f_blocks - fs.f_bfree) * fs.f_bsize);
         }
@@ -602,57 +675,6 @@ static const char install_script[] =
     "launchctl bootstrap \"gui/$(id -u)\" \"$P\"\n"
     "echo 'Henge is set up. You can close this window.'\n";
 
-/* What "curl -s http://10.0.2.4/.henge/lighten | sh" runs in macOS: less background work and drawing, for a Mac
-   whose CPUs are emulated: less animation and drawing, and the system part (update checks, Time Machine) with the
-   Mac's password once. Apple's own background agents can't be turned off with System Integrity Protection on
-   (launchctl disable of gui/ agents did not survive a log out on the Mac bench, 2026-11-08), so it doesn't try.
-   Reduce Motion and Reduce Transparency need System Settings (a script can't write com.apple.universalaccess).
-   Nothing reads the script's own stdin (sh is reading the script from it). */
-static const char lighten_script[] =
-    "#!/bin/sh\n"
-    "echo 'Making macOS lighter for Henge...'\n"
-    "defaults write com.apple.universalaccess reduceMotion -bool true 2>/dev/null </dev/null || "
-    "echo '  Reduce Motion: turn it on in System Settings, Accessibility, Motion.'\n"
-    "defaults write com.apple.universalaccess reduceTransparency -bool true 2>/dev/null </dev/null || "
-    "echo '  Reduce Transparency: turn it on in System Settings, Accessibility, Display.'\n"
-    "defaults write -g NSAutomaticWindowAnimationsEnabled -bool false </dev/null\n"
-    "defaults write -g NSWindowResizeTime -float 0.001 </dev/null\n"
-    "defaults write com.apple.dock launchanim -bool false </dev/null\n"
-    "defaults -currentHost write com.apple.screensaver idleTime -int 0 </dev/null\n"
-    "defaults write com.apple.WindowManager StandardHideWidgets -int 1 </dev/null\n"
-    "defaults write com.apple.WindowManager StageManagerHideWidgets -int 1 </dev/null\n"
-    "W=\"/System/Library/Desktop Pictures/Solid Colors/Black.png\"\n"
-    "[ -f \"$W\" ] || W=$(ls \"/System/Library/Desktop Pictures/Solid Colors/\"*.png 2>/dev/null | head -1)\n"
-    "if [ -n \"$W\" ]; then\n"
-    "  osascript -l JavaScript - \"$W\" >/dev/null 2>&1 <<'JS'\n"
-    "ObjC.import('AppKit');\n"
-    "function run(argv) {\n"
-    "  var url = $.NSURL.fileURLWithPath(argv[0]), screens = $.NSScreen.screens;\n"
-    "  for (var i = 0; i < screens.count; i++)\n"
-    "    $.NSWorkspace.sharedWorkspace.setDesktopImageURLForScreenOptionsError(url, screens.objectAtIndex(i), $({}), null);\n"
-    "}\n"
-    "JS\n"
-    "fi\n"
-    "killall Dock 2>/dev/null\n"
-    "echo 'Done: window and Dock animations, desktop widgets, the screen saver and a moving wallpaper are off.'\n"
-    "echo 'Also turn on Reduce Motion and Reduce Transparency: System Settings, Accessibility.'\n"
-    "echo 'Log out and back in for all of it to take effect. To undo: curl -s http://" HV_SHARE_ADDR "/.henge/unlighten | sh'\n";
-
-/* And back. The wallpaper stays as it is: pick one in System Settings. */
-static const char unlighten_script[] =
-    "#!/bin/sh\n"
-    "defaults write com.apple.universalaccess reduceMotion -bool false 2>/dev/null </dev/null\n"
-    "defaults write com.apple.universalaccess reduceTransparency -bool false 2>/dev/null </dev/null\n"
-    "defaults delete -g NSAutomaticWindowAnimationsEnabled 2>/dev/null </dev/null\n"
-    "defaults delete -g NSWindowResizeTime 2>/dev/null </dev/null\n"
-    "defaults delete com.apple.dock launchanim 2>/dev/null </dev/null\n"
-    "defaults -currentHost delete com.apple.screensaver idleTime 2>/dev/null </dev/null\n"
-    "defaults write com.apple.WindowManager StandardHideWidgets -int 0 </dev/null\n"
-    "defaults write com.apple.WindowManager StageManagerHideWidgets -int 0 </dev/null\n"
-    "killall Dock 2>/dev/null\n"
-    "echo 'Back as it was, apart from the wallpaper (System Settings, Wallpaper).'\n"
-    "echo 'Log out and back in (or restart) for all of it to take effect.'\n";
-
 static int serve_agent(Conn *c, Request *r) {
     if (body_discard(c, r) != 0) return -1;
     int fd = agent_path[0] ? open(agent_path, O_RDONLY) : -1;
@@ -707,20 +729,82 @@ static int clipboard_put(Conn *c, Request *r) {
     return respond_empty(c, r, 204, "No Content");
 }
 
+static void auto_forward_localhost_ports(const char *url) {
+    static const char *keys[] = {"localhost:", "localhost%3A", "localhost%3a", "127.0.0.1:", "127.0.0.1%3A", "127.0.0.1%3a"};
+    for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
+        const char *p = url;
+        size_t klen = strlen(keys[k]);
+        while ((p = strcasestr(p, keys[k])) != NULL) {
+            p += klen;
+            int port = atoi(p);
+            if (port >= 1024 && port <= 65535) hv_net_add_hostfwd(port, port);
+        }
+    }
+}
+
+static int open_url_put(Conn *c, Request *r) {
+    size_t len = 0;
+    char *url = body_small(c, r, &len);
+    if (!url) return -1;
+    while (len > 0 && (url[len - 1] == '\n' || url[len - 1] == '\r' || url[len - 1] == ' ')) url[--len] = 0;
+    if (strncasecmp(url, "http://", 7) == 0 || strncasecmp(url, "https://", 8) == 0) {
+        auto_forward_localhost_ports(url);
+        pthread_mutex_lock(&clip_mu);
+        if (!is_url_handler_on()) {
+            if (strcasestr(url, "oauth") || strcasestr(url, "redirect_uri=")) {
+                free(last_oauth_url);
+                last_oauth_url = url;
+                last_oauth_seen = time(NULL);
+            } else {
+                free(url);
+            }
+            pthread_mutex_unlock(&clip_mu);
+            return respond_empty(c, r, 409, "Conflict");
+        }
+        free(last_oauth_url);
+        last_oauth_url = NULL;
+        free(guest_open_url);
+        guest_open_url = url;
+        agent_seen = time(NULL);
+        pthread_mutex_unlock(&clip_mu);
+        return respond_empty(c, r, 204, "No Content");
+    }
+    free(url);
+    return respond_empty(c, r, 400, "Bad Request");
+}
+
 static int serve_henge(Conn *c, Request *r) {
     const char *what = r->path + strlen("/.henge/");
     if (!strcmp(what, "install") && !strcmp(r->method, "GET")) {
         if (body_discard(c, r) != 0) return -1;
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", install_script, sizeof install_script - 1);
     }
-    if ((!strcmp(what, "lighten") || !strcmp(what, "unlighten")) && !strcmp(r->method, "GET")) {
-        if (body_discard(c, r) != 0) return -1;
-        const char *s = what[0] == 'l' ? lighten_script : unlighten_script;
-        return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", s, strlen(s));
-    }
     if (!strcmp(what, "agent") && !strcmp(r->method, "GET")) return serve_agent(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "GET")) return clipboard_get(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "PUT")) return clipboard_put(c, r);
+    if (!strcmp(what, "open-url") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) return open_url_put(c, r);
+    if (!strcmp(what, "oauth-done") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) {
+        if (body_discard(c, r) != 0) return -1;
+        pthread_mutex_lock(&clip_mu);
+        free(last_oauth_url);
+        last_oauth_url = NULL;
+        guest_oauth_done = 1;
+        agent_seen = time(NULL);
+        pthread_mutex_unlock(&clip_mu);
+        return respond_empty(c, r, 204, "No Content");
+    }
+    if (!strcmp(what, "expose-port") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) {
+        size_t len = 0;
+        char *pstr = body_small(c, r, &len);
+        if (!pstr) return -1;
+        int port = atoi(pstr);
+        free(pstr);
+        if (port >= 1024 && port <= 65535) {
+            hv_net_add_hostfwd(port, port);
+            return respond_empty(c, r, 204, "No Content");
+        }
+        return respond_empty(c, r, 400, "Bad Request");
+    }
     if (body_discard(c, r) != 0) return -1;
     return respond_empty(c, r, 404, "Not Found");
 }

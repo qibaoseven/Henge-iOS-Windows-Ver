@@ -693,7 +693,14 @@ int hv_mem_emulate(HvCpu *cpu, uint32_t insn, uint64_t pc) {
         rc = do_vector(cpu, &op, va, el, pc);
         break;
     default: {
-        if (op.align && (va & (op.bytes - 1))) return alignment_fault(cpu, va, op.store, pc);
+        /* An unaligned access is a fault unless the guest turned alignment
+           checking off: SCTLR_EL1.nAA (bit 6) does that for the "ordered" loads
+           and stores only (LDAPR/STLR/LDAPUR/STLUR). Windows 11 ARM64's Prism
+           (xtajit64) runs unaligned user code through them and expects them to
+           work, which is what a real CPU does with nAA set. */
+        if (op.align && !(op.kind == HV_MEM_ORDERED && (cpu->sctlr_el1 & (1u << 6))) &&
+            (va & (op.bytes - 1)))
+            return alignment_fault(cpu, va, op.store, pc);
         int pair = op.kind == HV_MEM_PAIR;
         uint32_t esize = 1u << op.size;
         uint8_t buf[32] = {0};
@@ -706,6 +713,10 @@ int hv_mem_emulate(HvCpu *cpu, uint32_t insn, uint64_t pc) {
                 memcpy(buf, &a, esize);
                 if (pair) memcpy(buf + esize, &b, esize);
             }
+            /* A release store (STLR/STLUR) has to be ordered against the reads
+               and writes before it, or the guest's lock-free code sees its own
+               writes arrive out of order. */
+            if (op.kind == HV_MEM_ORDERED) __atomic_thread_fence(__ATOMIC_RELEASE);
             rc = hv_vmem_xfer(cpu, va, buf, op.bytes, 1, el, pc);
             break;
         }

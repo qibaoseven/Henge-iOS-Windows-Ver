@@ -170,8 +170,16 @@ static void ijc_clear(HvCpu *cpu, int kernel) {
 }
 
 /* ASIDs live in TTBR0 unless TCR.A1 puts them in TTBR1; then every process looks alike to us. */
+/* The ASID sits in TTBR0's top 16 bits, unless TCR.A1 (bit 22) moves it to
+   TTBR1 -- which Windows 11 ARM64 does, for the kernel half. Reading only
+   TTBR0 there reports "no ASID", and every process switch then throws the whole
+   branch cache away instead of the one process's. TCR.AS (bit 36) says whether
+   the guest programs 16-bit or 8-bit ASIDs. */
 static int current_asid(HvCpu *cpu) {
-    return (cpu->tcr_el1 >> 22) & 1 ? -1 : (int)(cpu->ttbr0_el1 >> 48);
+    uint64_t tcr = cpu->tcr_el1;
+    uint64_t src = ((tcr >> 22) & 1) ? cpu->ttbr1_el1 : cpu->ttbr0_el1;
+    uint32_t mask = ((tcr >> 36) & 1) ? 0xffffu : 0xffu;
+    return (int)((src >> 48) & mask);
 }
 
 /* ---- the (user id, page) set ---- */
@@ -258,12 +266,30 @@ void hv_ijc_switch(HvCpu *cpu) {
         return;
     }
     uint64_t base = cpu->ttbr0_el1 & OA_MASK & ~1ull;
-    if (!cpu->asid_cid[asid] || cpu->asid_base[asid] != base) {
+    if (asid == 0) {
+        /* Windows 11 ARM64's KiSwapProcess goes through ASID 0 with a transient
+           TTBR0 on the way from one process's to the next's. A new TTBR0 there
+           is not a new address space by itself; only an id that actually got
+           user entries filled under it (asid0_used) is stale. */
+        if (cpu->asid0_ttbr0 != base) {
+            if (cpu->asid_cid[0] && cpu->asid0_used) cpu->asid_cid[0] = 0;
+            cpu->asid0_used = 0;
+            cpu->asid0_ttbr0 = base;
+        }
+    }
+    /* ASID 0 is the transient one (see above), so its id is not keyed by TTBR0:
+       that is what makes a KiSwapProcess transition free. Every other ASID is
+       keyed by the whole TTBR0, because a guest may hand one hardware ASID to
+       more than one address space. */
+    int stale = asid == 0 ? !cpu->asid_cid[0] : (!cpu->asid_cid[asid] || cpu->asid_base[asid] != base);
+    if (stale) {
         cpu->asid_cid[asid] = fresh_cid(cpu);
         cpu->asid_base[asid] = base;
         cpu->cid_asid[cpu->asid_cid[asid]] = (uint16_t)asid;
         if (cpu->nasid_log < HV_ASID_LOG) cpu->asid_log[cpu->nasid_log] = (uint16_t)asid;
         if (cpu->nasid_log <= HV_ASID_LOG) cpu->nasid_log++;
+    } else if (asid != 0) {
+        cpu->asid_base[asid] = base;
     }
     cpu->ijc_salt[0] = (uint64_t)cpu->asid_cid[asid] << 48;
 }

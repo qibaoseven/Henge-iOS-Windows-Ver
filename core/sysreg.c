@@ -21,11 +21,21 @@
    that waits for an interrupt nothing sends. */
 #define ID_AA64PFR0  0x1100000001110011ull /* EL0/EL1 AArch64, FP+AdvSIMD with FP16, GICv3 sysregs, CSV2, CSV3 */
 #define ID_AA64ISAR0 0x0011100110212120ull /* AES+PMULL, SHA1, SHA2/512, CRC32, LSE, RDM, SHA3, DotProd, FHM, FlagM */
-#define ID_AA64ISAR1 0x0000001110211011ull /* DPB, PAuth (no-op), JSCVT, FCMA, LRCPC2, PACGA, FRINTTS, SB */
+/* PAuth is not reported: Windows 11 ARM64's ntoskrnl takes a path for ARMv8.3
+   pointer authentication that this translator does not implement, and with the
+   field clear it uses plain pointers instead. Everything else is what the
+   instructions here actually support (LRCPC2 matters: Prism's xtajit64 issues
+   LDAPUR/STLUR and checks it). */
+#define ID_AA64ISAR1 0x0000001100211001ull /* DPB, JSCVT, FCMA, LRCPC2, FRINTTS, SB (no PAuth) */
 #define ID_AA64MMFR0 0x0000000000100025ull /* 48-bit PA, 16-bit ASID, 4K/16K/64K granules */
 #define ID_AA64MMFR1 0x0000000000111000ull /* HPDS, LOR, PAN */
 #define ID_AA64DFR0  0x0000000000000006ull /* Armv8 debug, no PMU */
-#define MIDR         0x611f0220ull         /* Apple; a configuration constant for now */
+/* Cortex-A76 r4p1. Windows 11 ARM64's ntoskrnl reads MIDR to pick its CPU
+   workarounds and errata handling, and an implementer code it does not know
+   (Apple's 0x61) is treated as an unsupported CPU. This is what QEMU's virt
+   reports to a Windows guest, and what the instructions translated here
+   support exactly. */
+#define MIDR         0x414fd0b1ull
 #define CTR_EL0      0x9444c004ull         /* 64-byte lines, PIPT I-cache, IDC */
 #define CLIDR        0x0a200023ull         /* L1 split, L2 unified */
 #define CNTFRQ       24000000ull
@@ -225,10 +235,31 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
         hv_ijc_switch(cpu);
         return 0;
     }
-    case R(3, 0, 2, 0, 1): { /* TTBR1: rewritten unchanged on context switches; its ASID field only counts with TCR.A1 */
-        uint64_t changed = (cpu->ttbr1_el1 ^ v) & ((cpu->tcr_el1 >> 22) & 1 ? ~0ull : 0x0000ffffffffffffull);
+    case R(3, 0, 2, 0, 1): {
+        /* With TCR.A1 == 0 the ASID lives in TTBR0 and TTBR1's top bits mean
+           nothing: a rewrite of them is not a context switch, only a change of
+           the kernel half's base invalidates anything. With TCR.A1 == 1 (what
+           Windows 11 ARM64 programs, and the only reason the field is non-zero)
+           TTBR1 *is* where the ASID moves, so a different ASID there is a
+           process switch and has to save the outgoing process's entries rather
+           than throw the whole TLB away. */
+        int a1 = (int)((cpu->tcr_el1 >> 22) & 1);
+        uint64_t old = cpu->ttbr1_el1;
         cpu->ttbr1_el1 = v;
-        if (changed) cpu->m->stats.flush_why[3]++, hv_tlb_flush(cpu);
+        if (!a1) {
+            if ((old ^ v) & 0x0000ffffffffffffull) cpu->m->stats.flush_why[3]++, hv_tlb_flush(cpu);
+        } else {
+            /* The ASID field of TTBR1 is bits 63:48; a mask that follows TCR.AS.
+               A new ASID there is a new address space, and a stash filed under a
+               TTBR0 that the dead process also used must not be handed to it
+               (Windows reuses freed page tables). So the stashes of every ASID
+               go, which is what the hardware's ASID tagging amounts to. */
+            uint32_t mask = ((cpu->tcr_el1 >> 36) & 1) ? 0xffffu : 0xffu;
+            if (((old >> 48) & mask) != ((v >> 48) & mask)) {
+                hv_tlb_stash_drop(cpu, -1);
+                hv_ijc_switch(cpu);
+            }
+        }
         return 0;
     }
     case R(3, 0, 2, 0, 2):

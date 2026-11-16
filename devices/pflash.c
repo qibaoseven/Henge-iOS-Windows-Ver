@@ -1,95 +1,271 @@
 #include "pflash.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-/* RAM, not a device (see pflash.h). Nor-flash semantics are kept only where
-   they matter to the firmware: the code bank ignores writes, and bytes past what
-   a file filled read as erased 0xff. The command set (CFI) is not modelled --
-   UEFI reaches its variables through the writable bank as ordinary memory, and
-   the code bank is never erased or programmed at run time. */
+enum {
+    CFI_READ_ARRAY  = 0xff,
+    CFI_READ_ID     = 0x90,
+    CFI_QUERY       = 0x98,
+    CFI_READ_STATUS = 0x70,
+    CFI_WORD_PROG   = 0x40,
+    CFI_BUF_WRITE   = 0xe8,
+    CFI_BLOCK_ERASE = 0x20,
+    CFI_LOCK_SETUP  = 0x60,
+};
 
-static int load(const char *path, uint8_t *to, uint64_t cap, uint64_t *got) {
-    *got = 0;
-    if (!path) return 0;
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "hengevm: cannot open flash image %s\n", path);
-        return -1;
-    }
-    /* read(2), not fread: a short fread() zero-fills the rest of the buffer it
-       was given (musl does, which the standard permits), and the erased tail
-       must stay 0xff. */
-    int fd = fileno(f);
-    ssize_t n = 0, r = 0;
-    while ((uint64_t)n < cap && (r = read(fd, to + n, (size_t)(cap - (uint64_t)n))) > 0) n += r;
-    if (r < 0) {
-        fprintf(stderr, "hengevm: reading flash image %s failed\n", path);
-        fclose(f);
-        return -1;
-    }
-    int more = 0;
-    if ((uint64_t)n == cap) {
-        uint8_t extra;
-        more = read(fd, &extra, 1) > 0;
-    }
-    fclose(f);
-    if (more) {
-        fprintf(stderr, "hengevm: flash image %s is larger than its bank (%llu bytes)\n", path,
-                (unsigned long long)cap);
-        return -1;
-    }
-    *got = (uint64_t)n;
-    return 0;
+static void persist(HvPflash *f, uint64_t off, uint64_t len) {
+    if (f->fd < 0 || f->readonly || !len) return;
+    if (off + len > f->size) len = f->size - off;
+    (void)pwrite(f->fd, f->data + off, (size_t)len, (off_t)off);
 }
 
-HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, uint64_t code_size, uint64_t vars_size,
-                           const char *code_path, const char *vars_path) {
-    HvPflash *p = calloc(1, sizeof *p);
-    if (!p) return NULL;
-    p->m = m;
-    p->base[0] = pa, p->size[0] = code_size;
-    p->base[1] = pa + code_size, p->size[1] = vars_size;
-    for (int b = 0; b < 2; b++) {
-        p->mem[b] = malloc((size_t)p->size[b]);
-        if (!p->mem[b]) goto fail;
-        memset(p->mem[b], 0xff, (size_t)p->size[b]); /* erased */
+static uint64_t pflash_read(void *opaque, uint64_t off, unsigned size) {
+    HvPflash *f = opaque;
+    if (off + size > f->size) return ~0ull;
+
+    if (f->cmd == CFI_READ_ARRAY) {
+        uint64_t v = 0;
+        memcpy(&v, f->data + off, size);
+        return v;
     }
-    uint64_t got = 0;
-    if (load(code_path, p->mem[0], p->size[0], &got) != 0) goto fail;
-    if (got) fprintf(stderr, "hengevm: code flash %s, %llu bytes at %llx\n", code_path,
-                     (unsigned long long)got, (unsigned long long)pa);
-    if (load(vars_path, p->mem[1], p->size[1], &got) != 0) goto fail;
-    if (got) fprintf(stderr, "hengevm: vars flash %s, %llu bytes at %llx\n", vars_path,
-                     (unsigned long long)got, (unsigned long long)p->base[1]);
-    /* Code bank read-only, vars bank writable: the engine keeps writes out of a
-       read-only region, so no device callback is needed. */
-    if (hv_machine_add_ram(m, p->base[0], p->size[0], p->mem[0], 1) != 0) goto fail;
-    if (hv_machine_add_ram(m, p->base[1], p->size[1], p->mem[1], 0) != 0) goto fail;
-    return p;
-fail:
-    hv_pflash_destroy(p);
-    return NULL;
+
+    uint32_t word = 0;
+    if (f->cmd == CFI_READ_STATUS || f->cmd == CFI_BUF_WRITE) {
+        uint32_t st = f->status;
+        word = st | (st << 16);
+    } else if (f->cmd == CFI_READ_ID) {
+        uint32_t idx = (uint32_t)((off >> 2) & 0x3f);
+        if (idx == 0) word = 0x00890089u;      /* Intel manufacturer ID */
+        else if (idx == 1) word = 0x00180018u; /* Device ID */
+        else word = 0x00000000u;               /* Block lock status: unlocked */
+    } else if (f->cmd == CFI_QUERY) {
+        uint32_t idx = (uint32_t)((off >> 2) & 0xff);
+        uint32_t b = idx < sizeof(f->cfi) ? f->cfi[idx] : 0;
+        word = b | (b << 16);
+    }
+
+    uint64_t shifted = word >> ((off & 3) * 8);
+    if (size == 8) shifted |= (uint64_t)word << 32;
+    return size >= 8 ? shifted : shifted & ((1ull << (size * 8)) - 1);
 }
 
-void hv_pflash_destroy(HvPflash *p) {
-    if (!p) return;
-    free(p->mem[0]);
-    free(p->mem[1]);
-    free(p);
+static void pflash_write(void *opaque, uint64_t off, uint64_t val, unsigned size) {
+    HvPflash *f = opaque;
+    if (f->readonly || off >= f->size) return;
+
+    uint8_t c = (uint8_t)(val & 0xff);
+
+    /* Multi-cycle operations in progress */
+    if (f->wcycle > 0) {
+        if (f->cmd == CFI_WORD_PROG) {
+            unsigned n = off + size <= f->size ? size : (unsigned)(f->size - off);
+            for (unsigned i = 0; i < n; i++)
+                f->data[off + i] &= (uint8_t)(val >> (i * 8));
+            persist(f, off, n);
+            f->status = 0x80;
+            f->cmd = CFI_READ_STATUS;
+            f->wcycle = 0;
+            return;
+        }
+        if (f->cmd == CFI_BUF_WRITE) {
+            if (f->wcycle == 1) {
+                /* Word count minus 1 (in bank-width 32-bit transfers) */
+                f->wcount = (uint32_t)(val & 0xffff) + 1;
+                f->wcycle = 2;
+                return;
+            }
+            if (f->wcount > 0) {
+                unsigned n = off + size <= f->size ? size : (unsigned)(f->size - off);
+                for (unsigned i = 0; i < n; i++)
+                    f->data[off + i] &= (uint8_t)(val >> (i * 8));
+                if (off < f->wbase) f->wbase = off;
+                f->wcount--;
+                if (f->wcount == 0) f->wcycle = 3; /* expect 0xd0 confirm */
+                return;
+            }
+            /* wcycle == 3: confirm 0xd0 */
+            uint64_t sec = off & ~((uint64_t)HV_PFLASH_SECTOR - 1);
+            persist(f, sec, HV_PFLASH_SECTOR);
+            f->status = 0x80;
+            f->cmd = CFI_READ_STATUS;
+            f->wcycle = 0;
+            return;
+        }
+        if (f->cmd == CFI_BLOCK_ERASE) {
+            if (c == 0xd0) {
+                uint64_t sec = off & ~((uint64_t)HV_PFLASH_SECTOR - 1);
+                memset(f->data + sec, 0xff, HV_PFLASH_SECTOR);
+                persist(f, sec, HV_PFLASH_SECTOR);
+                f->status = 0x80;
+                f->cmd = CFI_READ_STATUS;
+            } else {
+                f->cmd = CFI_READ_ARRAY;
+            }
+            f->wcycle = 0;
+            return;
+        }
+        if (f->cmd == CFI_LOCK_SETUP) {
+            /* 0x01 lock, 0xd0 unlock, 0x2f lock-down: accept all as unlocked/ready */
+            f->status = 0x80;
+            f->cmd = (c == 0x01 || c == 0xd0 || c == 0x2f) ? CFI_READ_STATUS : CFI_READ_ARRAY;
+            f->wcycle = 0;
+            return;
+        }
+        f->wcycle = 0;
+    }
+
+    /* Cycle 0 command decode */
+    switch (c) {
+    case 0xff:
+    case 0xf0:
+        f->cmd = CFI_READ_ARRAY;
+        break;
+    case 0x70:
+        f->cmd = CFI_READ_STATUS;
+        break;
+    case 0x50:
+        f->status = 0x80;
+        f->cmd = CFI_READ_ARRAY;
+        break;
+    case 0x90:
+        f->cmd = CFI_READ_ID;
+        break;
+    case 0x98:
+        f->cmd = CFI_QUERY;
+        break;
+    case 0x40:
+    case 0x10:
+        f->cmd = CFI_WORD_PROG;
+        f->wcycle = 1;
+        break;
+    case 0xe8:
+        f->cmd = CFI_BUF_WRITE;
+        f->status = 0x80;
+        f->wbase = off & ~((uint64_t)HV_PFLASH_SECTOR - 1);
+        f->wcycle = 1;
+        break;
+    case 0x20:
+        f->cmd = CFI_BLOCK_ERASE;
+        f->wcycle = 1;
+        break;
+    case 0x60:
+        f->cmd = CFI_LOCK_SETUP;
+        f->wcycle = 1;
+        break;
+    default:
+        f->cmd = CFI_READ_ARRAY;
+        break;
+    }
 }
 
-int hv_pflash_save_vars(HvPflash *p, const char *path) {
-    if (!p || !path) return -1;
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "hengevm: cannot write %s\n", path);
-        return -1;
+static void init_cfi_table(HvPflash *f) {
+    memset(f->cfi, 0, sizeof f->cfi);
+    /* Query unique ASCII string "QRY" */
+    f->cfi[0x10] = 'Q';
+    f->cfi[0x11] = 'R';
+    f->cfi[0x12] = 'Y';
+    /* Primary vendor command set: Intel/Sharp Extended (0x0001) */
+    f->cfi[0x13] = 0x01;
+    f->cfi[0x14] = 0x00;
+    f->cfi[0x15] = 0x31;
+    f->cfi[0x16] = 0x00;
+    /* Voltage / timing info */
+    f->cfi[0x1b] = 0x45;
+    f->cfi[0x1c] = 0x55;
+    f->cfi[0x1f] = 0x07;
+    f->cfi[0x20] = 0x07;
+    f->cfi[0x21] = 0x0a;
+    f->cfi[0x22] = 0x00;
+    f->cfi[0x23] = 0x04;
+    f->cfi[0x24] = 0x04;
+    f->cfi[0x25] = 0x04;
+    /* Device geometry: two interleaved 32 MB x16 chips = 64 MB bank, 256 x 256 KB sectors */
+    f->cfi[0x27] = 25;   /* 2^25 = 32 MB per chip */
+    f->cfi[0x28] = 0x02; /* x8/x16 interface */
+    f->cfi[0x29] = 0x00;
+    f->cfi[0x2a] = 0x0b; /* max buffer write = 2^11 = 2048 B per chip (4096 B interleaved) */
+    f->cfi[0x2b] = 0x00;
+    f->cfi[0x2c] = 0x01; /* 1 erase block region */
+    uint16_t nblocks_m1 = (uint16_t)(f->size / HV_PFLASH_SECTOR - 1);
+    uint16_t chip_sec_256 = (uint16_t)((HV_PFLASH_SECTOR / 2) / 256);
+    f->cfi[0x2d] = (uint8_t)(nblocks_m1 & 0xff);
+    f->cfi[0x2e] = (uint8_t)(nblocks_m1 >> 8);
+    f->cfi[0x2f] = (uint8_t)(chip_sec_256 & 0xff);
+    f->cfi[0x30] = (uint8_t)(chip_sec_256 >> 8);
+    /* Primary extended table "PRI" at 0x31 */
+    f->cfi[0x31] = 'P';
+    f->cfi[0x32] = 'R';
+    f->cfi[0x33] = 'I';
+    f->cfi[0x34] = '1';
+    f->cfi[0x35] = '0';
+}
+
+HvPflash *hv_pflash_create(HvMachine *m, uint64_t pa, const char *path, int readonly) {
+    int flags = readonly ? O_RDONLY : O_RDWR;
+    int fd = open(path, flags);
+    if (fd < 0 && !readonly) fd = open(path, O_RDONLY), readonly = 1;
+    if (fd < 0) return NULL;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return NULL;
     }
-    size_t n = fwrite(p->mem[1], 1, (size_t)p->size[1], f);
-    int bad = n != p->size[1];
-    if (fclose(f) != 0) bad = 1;
-    return bad ? -1 : 0;
+
+    HvPflash *f = calloc(1, sizeof *f);
+    f->m = m;
+    f->pa = pa;
+    f->size = HV_PFLASH_SIZE;
+    f->fd = fd;
+    f->readonly = readonly;
+    f->cmd = CFI_READ_ARRAY;
+    f->status = 0x80;
+
+    void *buf = mmap(NULL, (size_t)f->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (buf == MAP_FAILED) {
+        close(fd);
+        free(f);
+        return NULL;
+    }
+    f->data = buf;
+    memset(f->data, 0xff, (size_t)f->size); /* erased NOR flash default */
+
+    size_t to_read = (uint64_t)st.st_size < f->size ? (size_t)st.st_size : (size_t)f->size;
+    size_t got = 0;
+    while (got < to_read) {
+        ssize_t n = pread(fd, f->data + got, to_read - got, (off_t)got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+
+    init_cfi_table(f);
+
+    if (readonly) {
+        close(f->fd);
+        f->fd = -1;
+        hv_machine_add_ram(m, pa, f->size, f->data, 1);
+    } else {
+        hv_machine_add_mmio(m, pa, f->size, f, pflash_read, pflash_write, "pflash-vars");
+    }
+    return f;
+}
+
+void hv_pflash_close(HvPflash *f) {
+    if (!f) return;
+    if (f->fd >= 0) {
+        fsync(f->fd);
+        close(f->fd);
+        f->fd = -1;
+    }
+    if (f->data) {
+        munmap(f->data, (size_t)f->size);
+        f->data = NULL;
+    }
+    free(f);
 }

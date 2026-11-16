@@ -1,58 +1,43 @@
-#ifndef HENGEVM_FW_CFG_H
-#define HENGEVM_FW_CFG_H
+#ifndef WINVM_FW_CFG_H
+#define WINVM_FW_CFG_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "machine.h"
 
-/* QEMU's fw_cfg, the byte-stream half only.
+#define HV_FW_CFG_MAX_FILES 32
 
-   The guest writes a 16-bit entry selector to +0x08 (big endian, the only
-   access the selector takes) and then reads the entry a byte at a time from
-   +0x00, also big endian. Reading past the end of an entry gives 0.
-
-   +0x10 (the DMA address register, one access wide, 64 bits) is not
-   implemented: a write is recorded and reads back as written, so a firmware
-   that probes for DMA sees a register that stores and nothing else. No entry
-   here is delivered through it, because the ACPI tables sit at fixed physical
-   addresses and arrive by their own entries instead of etc/table-loader
-   (see virt.c).
-
-   Entry numbers below 0x20 are QEMU's fixed ones; files live above that. */
-
-#define HV_FWCFG_SIGNATURE 0x0000u
-#define HV_FWCFG_ID 0x0001u
-#define HV_FWCFG_FILE_DIR 0x0019u /* (count, {size, select, reserved, name[56]}) big endian */
-#define HV_FWCFG_FIRST_FILE 0x0020u
-#define HV_FWCFG_MAX_FILES 32
-#define HV_FWCFG_NAME 56
-
-typedef struct HvFwCfgFile {
-    char name[HV_FWCFG_NAME];
-    uint8_t *data;
-    uint64_t len;
-    uint16_t select;
-} HvFwCfgFile;
+typedef void (*HvFwCfgWriteCb)(void *opaque, const uint8_t *data, uint32_t len);
 
 typedef struct HvFwCfg {
     HvMachine *m;
-    uint64_t base, size;
-    uint16_t sel;
-    uint64_t pos;   /* bytes read from the selected entry */
-    uint64_t dma;   /* last value written to +0x10 */
+    uint16_t cur_sel;
+    uint32_t cur_off;
+    uint32_t dma_hi;
+
+    /* Standard fixed keys (0x0000..0x001f) */
+    uint8_t fixed[0x20][64];
+    uint32_t fixed_len[0x20];
+
+    /* File directory (selector 0x0019, files at 0x0020 + i) */
+    uint8_t *dir_blob;
+    uint32_t dir_len;
     int nfiles;
-    HvFwCfgFile file[HV_FWCFG_MAX_FILES];
-    uint8_t *dir;   /* the FILE_DIR blob, built when all files are in */
-    uint64_t dir_len;
+    struct {
+        char name[56];
+        uint8_t *data;
+        uint32_t len;
+        int writable;
+        HvFwCfgWriteCb on_write;
+        void *write_opaque;
+    } files[HV_FW_CFG_MAX_FILES];
 } HvFwCfg;
 
-/* Maps the window (QEMU: base 0x09020000, size 0x18). NULL if the region is taken. */
-HvFwCfg *hv_fw_cfg_create(HvMachine *m, uint64_t base);
-void hv_fw_cfg_destroy(HvFwCfg *c);
-
-/* Adds a file entry ("etc/acpi/rsdp" and so on), copying the data. -1 if full. */
-int hv_fw_cfg_add_file(HvFwCfg *c, const char *name, const void *data, uint64_t len);
-/* Builds FILE_DIR from the files added so far. Called by the first read of it. */
-void hv_fw_cfg_finalize(HvFwCfg *c);
+HvFwCfg *hv_fw_cfg_create(HvMachine *m, uint64_t pa, uint16_t ncpus);
+/* Add a read-only named file (copies `data`). */
+int hv_fw_cfg_add_file(HvFwCfg *fc, const char *name, const void *data, uint32_t len);
+/* Add a guest-writable named file (e.g. "etc/ramfb") with a callback fired when DMA writes it. */
+int hv_fw_cfg_add_writable_file(HvFwCfg *fc, const char *name, uint32_t len, HvFwCfgWriteCb cb, void *opaque);
 
 #endif

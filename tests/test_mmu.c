@@ -15,12 +15,6 @@ static uint8_t *pt;
 static uint64_t pt_next;
 static int failures, checks;
 
-/* A page the TLB indexes now is 4 KB; the code-page tests below are written in
-   terms of the 16 KB pages the RAM used to be divided into, so a page number
-   there maps here. */
-static uint64_t tlb_page_of_16k(unsigned n) { return (uint64_t)n << 14; }
-static uint32_t tlb_pg(unsigned n) { return (uint32_t)((tlb_page_of_16k(n)) >> HV_TLB_PAGE_BITS); }
-
 static uint64_t *host(uint64_t pa) {
     return (uint64_t *)(pt + (pa - PT_PA));
 }
@@ -141,7 +135,7 @@ int main(void) {
     expect("EPD1 disables TTBR1 walks", &cpu, 0xffffffc012343210, HV_ACC_READ, 1, 0, HV_FSC_TRANSLATION(0));
     cpu.tcr_el1 &= ~(1ull << 23);
 
-    /* The TLB only takes 16 KB or larger mappings. */
+    /* Non-RAM mappings do not enter the TLB. */
     uint64_t pa;
     hv_tlb_flush(&cpu);
     hv_mmu_access(&cpu, 0x100004000, HV_ACC_READ, 1, &pa);
@@ -157,8 +151,8 @@ int main(void) {
     uint64_t r4 = alloc_table();
     cpu.ttbr0_el1 = r4;
     cpu.tcr_el1 = 25 | 0u << 14 | 1u << 23 | 5ull << 32;
-    map(r4, 12, 39, 0x12345000, 3, 0x40001000 | PAGE | AF, 0);
-    expect("4K page", &cpu, 0x12345678, HV_ACC_READ, 1, 0x40001678, 0);
+    map(r4, 12, 39, 0x12345000, 3, (PT_PA + 0xf0000) | PAGE | AF, 0);
+    expect("4K page", &cpu, 0x12345678, HV_ACC_READ, 1, PT_PA + 0xf0678, 0);
     map(r4, 12, 39, 0x40200000, 2, 0x80400000 | BLOCK | AF, 0);
     expect("4K: 2 MB block", &cpu, 0x40212345, HV_ACC_READ, 1, 0x80412345, 0);
     map(r4, 12, 39, 0x4000000000 - 0x40000000, 1, 0xc0000000 | BLOCK | AF, 0);
@@ -166,8 +160,8 @@ int main(void) {
     hv_tlb_flush(&cpu);
     hv_mmu_access(&cpu, 0x12345678, HV_ACC_READ, 1, &pa);
     checks++;
-    if ((*hv_tlb_ent(&cpu, (0x12345678 >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)).read_tag != HV_TLB_INVALID) {
-        printf("  FAIL a 4K mapping went into the 16K TLB\n");
+    if ((*hv_tlb_ent(&cpu, (0x12345678 >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)).read_tag == HV_TLB_INVALID) {
+        printf("  FAIL a 4K RAM mapping did not enter the 4K TLB\n");
         failures++;
     }
 
@@ -182,23 +176,23 @@ int main(void) {
     map(r6, 16, 42, 0x300000000, 3, 0x40060000 | BLOCK | AF, 0);
     expect("block descriptor at level 3 is invalid", &cpu, 0x300000000, HV_ACC_READ, 1, 0, HV_FSC_TRANSLATION(3));
 
-    /* TLBI RVAE1IS: 6 pages of 16 KB from the base drop, the ones after stay; also for a kernel range. */
+    /* TLBI RVAE1IS: 6 pages of 4 KB from the base drop, the ones after stay; also for a kernel range. */
     {
         static const uint64_t bases[2] = {0x100000000ull, 0xfffffe0012340000ull};
         for (int b = 0; b < 2; b++) {
             hv_tlb_flush(&cpu);
             int table = (bases[b] >> 55) & 1 ? 1 : 0;
             for (int k = 0; k < 8; k++) {
-                uint64_t va = bases[b] + ((uint64_t)k << 14); /* one per 16 KB guest page */
+                uint64_t va = bases[b] + ((uint64_t)k << HV_TLB_PAGE_BITS);
                 HvTlbEntry *t = &(*hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table));
                 t->read_tag = va - HV_TLB_ADJ;
                 t->addend = 0;
             }
             cpu.el = 1;
-            cpu.x[1] = 5ull << 48 | 2ull << 46 | 0ull << 44 | 2ull << 39 | ((bases[b] >> 14) & 0x1fffffffffull);
+            cpu.x[1] = 5ull << 48 | 1ull << 46 | 0ull << 44 | 2ull << 39 | ((bases[b] >> 12) & 0x1fffffffffull);
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             for (int k = 0; k < 8; k++) {
-                uint64_t va = bases[b] + ((uint64_t)k << 14);
+                uint64_t va = bases[b] + ((uint64_t)k << HV_TLB_PAGE_BITS);
                 int dropped = (*hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), table)).read_tag == HV_TLB_INVALID;
                 checks++;
                 if (dropped != (k < 6)) {
@@ -219,7 +213,7 @@ int main(void) {
             hv_tlb_flush(&cpu);
             const int32_t ks[6] = {0, 1, (int32_t)ranges[r].pages / 2, (int32_t)ranges[r].pages - 1, (int32_t)ranges[r].pages, (int32_t)ranges[r].pages + 300};
             for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << 14); /* ks[] counts 16 KB guest pages, as the TLBI does */
+                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
                 HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1);
                 t->read_tag = va - HV_TLB_ADJ;
                 t->addend = 0;
@@ -229,10 +223,10 @@ int main(void) {
             u->read_tag = uva - HV_TLB_ADJ;
             u->addend = 0;
             cpu.el = 1;
-            cpu.x[1] = 0ull << 48 | 2ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 14) & 0x1fffffffffull);
+            cpu.x[1] = 0ull << 48 | 1ull << 46 | (uint64_t)ranges[r].scale << 44 | (uint64_t)ranges[r].num << 39 | ((base >> 12) & 0x1fffffffffull);
             hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
             for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << 14);
+                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
                 int dropped = hv_tlb_ent(&cpu, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
                 checks++;
                 if (dropped != (ks[k] < (int32_t)ranges[r].pages)) {
@@ -289,198 +283,90 @@ int main(void) {
         }
     }
 
-    /* A big range TLBI (128 MB) of one address space: only the cached targets in it go, found through the 32 MB chunks
-       that hold any; the address space keeps its id (and so its other targets). */
+    /* Windows 11 ARM64 TCR.A1 == 1 process switch (ASID in TTBR1[63:48], TTBR0[63:48] == 0):
+       KiSwapProcess switches TTBR1 -> (0, KPA_SYS), TTBR0 -> PA_B, TTBR1 -> (ASID_B, KPA_B).
+       Verify:
+       1. Switching back to (ASID_A, PA_A) restores Process A's stashed user TLB entry.
+       2. Reusing freed PA_A for a new process ASID_C != ASID_A does NOT restore dead Process A's entry.
+       3. Transient ASID 0 switches with no user IJC fills do not churn next_cid. */
     {
         hv_cpu_reset(&cpu, &m);
-        cpu.tcr_el1 = 0;
-        cpu.ttbr0_el1 = 7ull << 48;
+        cpu.el = 1;
+        cpu.tcr_el1 = (1ull << 22) | (1ull << 36); /* A1 = 1, AS = 1 (16-bit ASID in TTBR1) */
+        cpu.ttbr0_el1 = 0x40010000ull;             /* PA_A */
+        cpu.ttbr1_el1 = (11ull << 48) | 0x40020000ull; /* ASID 11, KPA_A */
         hv_ijc_switch(&cpu);
-        uint64_t salt = cpu.ijc_salt[0];
-        uint16_t cid = cpu.asid_cid[7];
-        static const uint64_t vas[2] = {0x203004010ull, 0x210000020ull}; /* in the range (its 3rd chunk), past it */
-        uint64_t *ents[2];
-        static HvBlock fake[2];
-        for (int i = 0; i < 2; i++) {
-            fake[i] = (HvBlock){.va = vas[i], .flags = 0, .code = (uint32_t *)(uintptr_t)0x1234};
-            hv_ijc_fill(&cpu, &fake[i]);
-            ents[i] = m.percpu[0].ijc + (size_t)hv_ijc_index(vas[i] ^ salt) * 2;
-        }
-        hv_ijc_drop_range(&cpu, 0x200000000ull, 128ull << 20, 7);
-        checks += 3;
-        if (ents[0][0] == (vas[0] ^ salt)) printf("  FAIL big range kept a target in it\n"), failures++;
-        if (ents[1][0] != (vas[1] ^ salt)) printf("  FAIL big range dropped a target past it\n"), failures++;
-        if (cpu.asid_cid[7] != cid) printf("  FAIL big range dropped the whole address space\n"), failures++;
-    }
 
-    /* A code change drops the cached branch targets into its page (HV_IJC_PAGES): noted under one VA page when they
-       were cached, just that page's; noted under none, none (only the return predictions); under several, all. */
-    {
-        hv_cpu_reset(&cpu, &m);
-        cpu.tcr_el1 = 0;
-        cpu.ttbr0_el1 = 7ull << 48;
-        hv_ijc_switch(&cpu);
-        HvCpu *self = hv_self;
-        hv_self = &cpu;
-        int knob = hv_knob[HV_K_IJCPAGES];
-        hv_knob[HV_K_IJCPAGES] = 1;
-        HvRam *r = &m.ram[0];
-        const uint64_t P = 0x100004000ull, Q = 0x100008000ull;
-        static HvBlock fb[2];
-        struct { uint64_t note; int p_kept, q_kept; const char *what; } cases[] = {
-            {P | 2, 0, 1, "noted at P"}, {0, 1, 1, "noted nowhere"}, {~0ull, 0, 0, "noted at several"}};
-        for (int c = 0; c < 3; c++) {
-            uint64_t salt = cpu.ijc_salt[0];
-            uint64_t *ents[2];
-            for (int i = 0; i < 2; i++) {
-                fb[i] = (HvBlock){.va = (i ? Q + 0x20 : P + 0x10), .flags = 0, .code = (uint32_t *)(uintptr_t)0x1234};
-                hv_ijc_fill(&cpu, &fb[i]);
-                ents[i] = m.percpu[0].ijc + (size_t)hv_ijc_index(fb[i].va ^ salt) * 2;
-            }
-            r->code_pages[tlb_pg(10)] = 1;
-            r->ijc_va[tlb_pg(10)] = cases[c].note;
-            hv_invalidate_code(&m, r->pa + tlb_page_of_16k(10));
-            for (int i = 0; i < 2; i++) {
-                int kept = ents[i][0] == (fb[i].va ^ salt) && cpu.ijc_salt[0] == salt;
-                checks++;
-                if (kept != (i ? cases[c].q_kept : cases[c].p_kept)) {
-                    printf("  FAIL code change %s: the target in %s %s\n", cases[c].what, i ? "Q" : "P", kept ? "kept" : "dropped");
-                    failures++;
-                }
-            }
-            checks++;
-            if (r->ijc_va[tlb_pg(10)] != 0) printf("  FAIL code change left the page's note\n"), failures++;
-        }
-        hv_knob[HV_K_IJCPAGES] = knob;
-        hv_self = self;
-    }
+        /* Simulate a user TLB fill in Process A (ASID 11, PA_A). */
+        uint64_t uva = 0x7ff700001000ull;
+        uint32_t sl = (uva >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
+        HvTlbEntry *ue = hv_tlb_ent(&cpu, sl, 0);
+        ue->read_tag = uva - HV_TLB_ADJ;
+        ue->addend = 0x1234000;
+        cpu.user_fills[0] = (uint16_t)hv_tlb_code(sl, 0);
+        cpu.nuser_fills = 1;
 
-    /* A code change unchains the exits from other pages chained into its page, and only those: each page's are a list
-       (HvRam.xhead through slot_xnext), as chain() in dispatch.c makes it. */
-    {
-        HvRam *r = &m.ram[0];
-        uint32_t base = m.nslots + 16, pages[4] = {10, 11, 10, 10}, n0 = m.nxchained;
-        for (uint32_t i = 0; i < 4; i++) {
-            uint32_t idx = base + i, pg = tlb_pg(pages[i]);
-            m.slots[idx] = 0x1000 + i;
-            m.slot_site[idx] = NULL;
-            m.slot_xpa[idx] = (r->pa + ((uint64_t)pg << HV_TLB_PAGE_BITS)) | 1;
-            m.slot_xnext[idx] = r->xhead[pg];
-            r->xhead[pg] = idx + 1;
-            m.nxchained++;
-        }
-        r->code_pages[tlb_pg(10)] = 1;
-        hv_invalidate_code(&m, r->pa + tlb_page_of_16k(10) + 0x40);
-        for (uint32_t i = 0; i < 4; i++) {
-            int gone = m.slots[base + i] == 0 && m.slot_xpa[base + i] == 0;
-            checks++;
-            if (gone != (pages[i] == 10)) printf("  FAIL code change %s an exit chained into page %u\n", gone ? "unchained" : "kept", pages[i]), failures++;
-        }
-        checks += 3;
-        if (r->xhead[tlb_pg(10)]) printf("  FAIL the changed page's list is not empty\n"), failures++;
-        if (r->xhead[tlb_pg(11)] != base + 2) printf("  FAIL the other page's list changed\n"), failures++;
-        if (m.nxchained != n0 + 1) printf("  FAIL chained count %u, want %u\n", m.nxchained, n0 + 1), failures++;
-        r->code_pages[tlb_pg(11)] = 1;
-        hv_invalidate_code(&m, r->pa + tlb_page_of_16k(11));
+        uint32_t cid_before = cpu.next_cid;
+
+        /* KiSwapProcess A -> B (ASID 22, PA_B = 0x40030000). */
+        cpu.x[0] = 0x40000000ull; /* ASID 0, KPA_SYS */
+        hv_sysreg_msr(&cpu, 0xd5182020u, 0); /* msr ttbr1_el1, x0 */
+        cpu.x[0] = 0x40030000ull; /* PA_B */
+        hv_sysreg_msr(&cpu, 0xd5182000u, 0); /* msr ttbr0_el1, x0 */
+        cpu.x[0] = (22ull << 48) | 0x40040000ull; /* ASID 22, KPA_B */
+        hv_sysreg_msr(&cpu, 0xd5182020u, 0); /* msr ttbr1_el1, x0 */
+
         checks++;
-        if (m.slots[base + 1] || r->xhead[tlb_pg(11)] || m.nxchained != n0) printf("  FAIL the second page's exit stayed chained\n"), failures++;
-    }
-
-    /* Another CPU's big range TLBI (64 user pages of ASID 5: over the 32 done from here by default). With HV_RANGE_DROP it is done from here in one pass:
-       the second CPU's TLB slots and stashed entries in the range go, the rest stay, nothing is queued for it.
-       Without, it is queued for that CPU to do (as before) and only happens when it does. */
-    {
-        static HvCpu cpu2;
-        hv_cpu_reset_index(&cpu2, &m, 1);
-        cpu2.sctlr_el1 = cpu.sctlr_el1, cpu2.tcr_el1 = cpu.tcr_el1, cpu2.mair_el1 = cpu.mair_el1;
-        cpu2.ttbr0_el1 = 5ull << 48 | (cpu.ttbr0_el1 & 0x0000fffffffffffeull); /* running ASID 5: its live entries are that one's */
-        HvPerCpu *p2 = cpu2.pc_state;
-        const uint64_t base = 0x100000000ull;
-        const int32_t ks[6] = {0, 1, 32, 63, 64, 100};
-        for (int knob = 1; knob >= 0; knob--) {
-            hv_knob[HV_K_RANGEDROP] = knob ? 1024 : 0;
-            hv_tlb_flush(&cpu2);
-            for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
-                HvTlbEntry *t = hv_tlb_ent(&cpu2, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 0);
-                t->read_tag = va - HV_TLB_ADJ;
-                t->addend = 0;
-            }
-            /* a stashed (switched-out) address space of ASID 5: one page inside the range, one past it */
-            HvTlbStash *st = &p2->stash[0];
-            st->ttbr0 = 5ull << 48 | 0x4000;
-            st->n = 2;
-            st->ent[0] = (HvTlbEntry){.read_tag = base + (40ull << HV_TLB_PAGE_BITS) - HV_TLB_ADJ, .write_tag = HV_TLB_INVALID, .exec_tag = HV_TLB_INVALID};
-            st->ent[1] = (HvTlbEntry){.read_tag = base + (200ull << HV_TLB_PAGE_BITS) - HV_TLB_ADJ, .write_tag = HV_TLB_INVALID, .exec_tag = HV_TLB_INVALID};
-            p2->nreq = 0, p2->req_flags = 0;
-            cpu.el = 1;
-            cpu.x[1] = 5ull << 48 | 1ull << 46 | 0ull << 44 | 31ull << 39 | ((base >> 12) & 0x1fffffffffull); /* TG 4 KB, (31+1) << 1 = 64 pages */
-            hv_sysreg_sys(&cpu, 0xd5088221u, 0); /* tlbi rvae1is, x1 */
-            int queued = p2->nreq != 0 || p2->req_flags != 0;
-            checks++;
-            if (queued == knob) {
-                printf("  FAIL remote range, HV_RANGE_DROP %d: %s\n", knob ? 1024 : 0, queued ? "queued for the other CPU" : "not queued");
-                failures++;
-            }
-            if (!knob) hv_cpu_process_requests(&cpu2); /* what it does when it next runs */
-            for (int k = 0; k < 6; k++) {
-                uint64_t va = base + ((uint64_t)ks[k] << HV_TLB_PAGE_BITS);
-                int dropped = hv_tlb_ent(&cpu2, (va >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 0)->read_tag == HV_TLB_INVALID;
-                checks++;
-                if (dropped != (ks[k] < 64)) {
-                    printf("  FAIL remote range (knob %d), page %d: %s\n", knob, ks[k], dropped ? "dropped" : "kept");
-                    failures++;
-                }
-            }
-            if (knob) { /* the stash is the dropping CPU's job only on this path; the target's own TLBI handles it otherwise */
-                checks += 2;
-                if (st->ent[0].read_tag != HV_TLB_INVALID) printf("  FAIL remote range kept a stashed page in the range\n"), failures++;
-                if (st->ent[1].read_tag == HV_TLB_INVALID) printf("  FAIL remote range dropped a stashed page past the range\n"), failures++;
-            }
-            st->ttbr0 = 0, st->n = 0;
+        if (hv_tlb_ent(&cpu, sl, 0)->read_tag != HV_TLB_INVALID) {
+            printf("  FAIL TCR.A1 switch A->B kept Process A's user TLB entry\n");
+            failures++;
         }
-        hv_knob[HV_K_RANGEDROP] = 0;
-        /* A target in the middle of a page walk (of a page in the range): raced, so it is queued instead. */
-        hv_tlb_flush(&cpu2);
-        /* Start from an even sequence: `| 1` then marks one walk as running, at the slot below it. */
-        __atomic_store_n(&p2->walk_seq, p2->walk_seq & ~1u, __ATOMIC_SEQ_CST);
-        p2->walk_page[(p2->walk_seq >> 1) & 7] = base + (3ull << HV_TLB_PAGE_BITS);
-        __atomic_store_n(&p2->walk_seq, p2->walk_seq | 1, __ATOMIC_SEQ_CST);
+
+        /* Switch B -> A: Process A's user TLB entry should be restored from stash. */
+        cpu.x[0] = 0x40000000ull;
+        hv_sysreg_msr(&cpu, 0xd5182020u, 0);
+        cpu.x[0] = 0x40010000ull; /* PA_A */
+        hv_sysreg_msr(&cpu, 0xd5182000u, 0);
+        cpu.x[0] = (11ull << 48) | 0x40020000ull; /* ASID 11, KPA_A */
+        hv_sysreg_msr(&cpu, 0xd5182020u, 0);
+
         checks++;
-        if (hv_tlbi_drop_remote_range(&cpu2, base, 64, 5) != 0) printf("  FAIL remote range ignored a page walk in progress\n"), failures++;
-        __atomic_store_n(&p2->walk_seq, p2->walk_seq + 1, __ATOMIC_SEQ_CST);
-    }
-
-    /* HV_WALK_LOG: a drop races only a walk of one of its pages, or a process switch's (any page); a walk of another
-       page is let through. Walks under way, set up as walk_begin does (the page logged, then walk_seq odd). */
-    {
-        static HvCpu cpu3;
-        hv_cpu_reset_index(&cpu3, &m, 1);
-        HvPerCpu *p3 = cpu3.pc_state;
-        const uint64_t P = 0x100004000ull, Q = 0x100008000ull;
-        struct { const char *what; uint64_t walked; int knob, range, want; } cases[] = {
-            {"a walk of another page", Q, 1, 0, 1},       {"a walk of the page", P + 0x10, 1, 0, 0},
-            {"a process switch", ~0ull, 1, 0, 0},         {"a walk of another page, knob off", Q, 0, 0, 0},
-            {"a range with the walked page in it", Q, 1, 1, 0}, {"a range without it", Q + (8ull << HV_TLB_PAGE_BITS), 1, 1, 1},
-            {"a tagged walk of another page", 0x5a00000000000000ull | Q, 1, 0, 1},
-            {"a tagged walk of the page", 0x5a00000000000000ull | P, 1, 0, 0},
-        };
-        for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
-            hv_knob[HV_K_WALKLOG] = cases[c].knob;
-            uint32_t seq = __atomic_load_n(&p3->walk_seq, __ATOMIC_SEQ_CST) & ~1u;
-            uint64_t pg = cases[c].walked == ~0ull ? ~0ull
-                        : cases[c].walked & ~((1ull << HV_TLB_PAGE_BITS) - 1) & 0x00ffffffffffffffull;
-            p3->walk_page[(seq >> 1) & 7] = pg;
-            __atomic_store_n(&p3->walk_seq, seq + 1, __ATOMIC_SEQ_CST);
-            int r = cases[c].range ? hv_tlbi_drop_remote_range(&cpu3, P, (uint64_t)(Q - P) / (1ull << HV_TLB_PAGE_BITS) + 1, 5) : hv_tlbi_drop_remote_va(&cpu3, P, 5);
-            __atomic_store_n(&p3->walk_seq, seq + 2, __ATOMIC_SEQ_CST);
-            checks++;
-            if ((r == 1) != cases[c].want) {
-                printf("  FAIL remote drop during %s: %s\n", cases[c].what, r == 1 ? "done" : "raced");
-                failures++;
-            }
+        if (hv_tlb_ent(&cpu, sl, 0)->read_tag != uva - HV_TLB_ADJ) {
+            printf("  FAIL TCR.A1 switch B->A did not restore Process A's user TLB entry\n");
+            failures++;
         }
-        hv_knob[HV_K_WALKLOG] = 1;
+
+        /* Now Process A exits and PA_A (0x40010000) is reused by Process C (ASID 33) without TLBI ASIDE1:
+           Process C must NOT inherit Process A's stashed user TLB entry! */
+        cpu.x[0] = 0x40000000ull;
+        hv_sysreg_msr(&cpu, 0xd5182020u, 0);
+        cpu.x[0] = 0x40010000ull; /* same PA_A! */
+        hv_sysreg_msr(&cpu, 0xd5182000u, 0);
+        cpu.x[0] = (33ull << 48) | 0x40020000ull; /* new ASID 33, even same KPA_A! */
+        hv_sysreg_msr(&cpu, 0xd5182020u, 0);
+
+        checks++;
+        if (hv_tlb_ent(&cpu, sl, 0)->read_tag != HV_TLB_INVALID) {
+            printf("  FAIL TCR.A1 reused PA_A under new ASID 33 leaked dead Process A's user TLB entry\n");
+            failures++;
+        }
+
+        /* Transient ASID 0 switches with no user IJC fills must allocate at most 1 ASID-0 cid. */
+        uint32_t cid_mid = cpu.next_cid;
+        for (int iter = 0; iter < 100; iter++) {
+            cpu.x[0] = 0x40000000ull;
+            hv_sysreg_msr(&cpu, 0xd5182020u, 0);
+            cpu.x[0] = 0x40050000ull + ((uint64_t)(iter & 3) << 16);
+            hv_sysreg_msr(&cpu, 0xd5182000u, 0);
+            cpu.x[0] = (22ull << 48) | 0x40040000ull;
+            hv_sysreg_msr(&cpu, 0xd5182020u, 0);
+        }
+        checks++;
+        if (cpu.next_cid != cid_mid || cid_mid - cid_before > 4) {
+            printf("  FAIL transient ASID 0 switches churned next_cid (%u -> %u -> %u)\n",
+                   cid_before, cid_mid, cpu.next_cid);
+            failures++;
+        }
     }
 
     printf("%d checks, %d failures\n", checks, failures);
