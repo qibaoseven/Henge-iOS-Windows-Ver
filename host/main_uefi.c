@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
     const char *cd_paths[3] = {NULL, NULL, NULL};
     int disk_ro = 0;
     int ram_mb = 2048, ncpus = 4, verbose = 0;
-    int display_kind = HV_DISPLAY_AUTO;
+    int display_kind = HV_DISPLAY_AUTO, gpu3d = 0;
     uint32_t panel_w = 0, panel_h = 0;
     static struct option opts[] = {{"code", required_argument, 0, 'c'},
                                    {"vars", required_argument, 0, 'v'},
@@ -61,6 +61,7 @@ int main(int argc, char **argv) {
                                    {"disk-ro", no_argument, 0, 'D'},
                                    {"display", required_argument, 0, 'g'},
                                    {"panel", required_argument, 0, 'p'},
+                                   {"gpu3d", no_argument, 0, '3'},
                                    {"cd0", required_argument, 0, '0'},
                                    {"cd1", required_argument, 0, '1'},
                                    {"cd2", required_argument, 0, '2'},
@@ -68,7 +69,7 @@ int main(int argc, char **argv) {
                                    {"verbose", no_argument, 0, 'V'},
                                    {0, 0, 0, 0}};
     int o;
-    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV0:1:2:g:p:", opts, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "c:v:r:n:s:d:DV0:1:2:g:p:3", opts, NULL)) != -1) {
         switch (o) {
         case 'c': code = optarg; break;
         case 'v': vars = optarg; break;
@@ -95,6 +96,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
             break;
+        case '3': gpu3d = 1; break;
         case 'V': verbose = 1; break;
         default: return 2;
         }
@@ -128,6 +130,10 @@ int main(int argc, char **argv) {
 
     HvWinVirt b;
     memset(&b, 0, sizeof b);
+    if (gpu3d && display_kind == HV_DISPLAY_RAMFB) {
+        fprintf(stderr, "hv_uefi: --gpu3d needs a virtio-gpu (--display gpu or auto)\n");
+        return 2;
+    }
     if (hv_winvirt_create(&b, m, cpus, ncpus, (uint64_t)ram_mb << 20, NULL, code, vars, disk, NULL, NULL, 0,
                           display_kind, panel_w, panel_h) != 0) {
         fprintf(stderr, "hv_uefi: cannot build the machine (firmware, memory or a window refused)\n");
@@ -145,6 +151,9 @@ int main(int argc, char **argv) {
     }
     b.uart->output = serial_out; /* the firmware's console is here */
     b.uart->output_opaque = NULL;
+    if (gpu3d && hv_winvirt_enable_gpu3d(&b) != 0)
+        fprintf(stderr, "hv_uefi: 3D unavailable, staying 2D\n");
+
     hv_winvirt_reset_cpu(&b);
 
     fprintf(stderr,

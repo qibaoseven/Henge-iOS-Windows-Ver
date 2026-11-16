@@ -39,7 +39,7 @@ needs_build=0
 [ -x "$BIN" ] || needs_build=1
 for f in core/classify core/operands core/translate core/dispatch core/memop core/exception core/sysreg core/machine \
          devices/winvirt devices/fdt devices/fw_cfg devices/pflash devices/gicv3 devices/pl011 devices/pl031 \
-         devices/pl061 devices/pcie devices/virtio devices/virtio_net devices/virtio_snd devices/virtio_blk devices/virtio_gpu devices/gpu_renderer \
+         devices/pl061 devices/pcie devices/virtio devices/virtio_net devices/virtio_snd devices/virtio_blk devices/virtio_gpu devices/gpu_renderer devices/gpu_renderer_virgl \
          devices/acpi devices/timer devices/nvme devices/hda devices/xhci devices/fb_display devices/usb_storage \
          host/disk host/jit_region host/main_uefi; do
     o=build/posix/vb_$(basename "$f").o
@@ -69,5 +69,6 @@ EXTRA=""
 [ -n "${HV_CD2:-}" ] && EXTRA="$EXTRA --cd2 $HV_CD2"
 [ -n "${HV_DISPLAY:-}" ] && EXTRA="$EXTRA --display $HV_DISPLAY"
 [ -n "${HV_PANEL:-}" ] && EXTRA="$EXTRA --panel $HV_PANEL"
+[ -n "${HV_GPU3D:-}" ] && EXTRA="$EXTRA --gpu3d"
 # shellcheck disable=SC2086
 exec "$BIN" --code "$CODE" --vars "$VARS" --ram "$RAM" $EXTRA

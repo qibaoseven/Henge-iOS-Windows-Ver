@@ -104,6 +104,10 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
                       int display_kind, uint32_t panel_w, uint32_t panel_h);
 /* Put an ISO on xHCI port 3 as a read-only CD-ROM (before the CPU starts).
    Call twice to attach two CDs (setup media + payload media). */
+/* Turn on 3D for the virtio-gpu already in the board (virglrenderer, if linked).
+   Call before the first CPU starts: the guest negotiates the feature at reset. */
+int hv_winvirt_enable_gpu3d(HvWinVirt *b);
+
 int hv_winvirt_attach_cd(HvWinVirt *b, const char *iso_path);
 void hv_winvirt_detach_cds(HvWinVirt *b);
 void hv_winvirt_reset_cpu(HvWinVirt *b);

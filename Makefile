@@ -12,7 +12,7 @@ HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 WINDEV = $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/pl061.o $(B)/pcie.o \
          $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o \
          $(B)/xhci.o $(B)/acpi.o $(B)/nvme.o $(B)/hda.o $(B)/fdt.o $(B)/fw_cfg.o $(B)/pflash.o \
-         $(B)/winvirt.o $(B)/fb_display.o $(B)/usb_storage.o $(B)/virtio_gpu.o $(B)/gpu_renderer.o
+         $(B)/winvirt.o $(B)/fb_display.o $(B)/usb_storage.o $(B)/virtio_gpu.o $(B)/gpu_renderer.o $(B)/gpu_renderer_virgl.o
 # The macOS guest build ("Henge" the app) still ships the Apple GPU path, which
 # the Windows direction does not use.
 DEV = $(WINDEV) $(B)/pvg_metal.o $(B)/pvg_mac.o $(B)/fb_metal.o
@@ -21,6 +21,15 @@ METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -frame
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
         $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown $(B)/test_fb_damage $(B)/test_usb_storage
+
+# 3D (virglrenderer) is opt-in: `make VIRGL=1` also links the library and defines
+# HV_HAVE_VIRGL, which is what makes hv_gpu_renderer_virgl() return a renderer.
+# Without it everything still builds and the GPU device stays 2D.
+VIRGL ?= 0
+ifeq ($(VIRGL),1)
+CFLAGS += -DHV_HAVE_VIRGL
+VIRGL_LIBS = -lvirglrenderer
+endif
 
 # `hengevm` / `hengevm-ref` were the macOS-guest binaries (host/main.c, vm.c,
 # hvf_ref.c); those sources went away with the Windows direction, so they are
@@ -31,7 +40,7 @@ all: $(TESTS) $(B)/hv_uefi $(B)/hvsparse
 # UEFI smoke runner: the Windows machine, its firmware, and its serial port.
 # Needs an arm64 host (the engine's JIT translates arm64; x86 cannot build core/).
 $(B)/hv_uefi: host/main_uefi.c $(ENGINE) $(WINDEV)
-	$(CC) $(CFLAGS) host/main_uefi.c $(ENGINE) $(WINDEV) -latomic -lpthread -o $@
+	$(CC) $(CFLAGS) host/main_uefi.c $(ENGINE) $(WINDEV) -latomic -lpthread $(VIRGL_LIBS) -o $@
 
 # Mac-only test tool: the same machine with the CPU on Hypervisor.framework, for comparing runs.
 $(B)/hengevm-ref: host/hvf_ref.c host/hvf_ref.entitlements $(ENGINE) $(DEV)

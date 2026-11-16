@@ -25,6 +25,7 @@ static const char *exit_reason;
 static int board_in_use; /* the board holds open media that must be released */
 static int display_kind = 2; /* both, until the UI says otherwise */
 static uint32_t panel_w, panel_h;
+static int gpu3d;
 
 HENGE_EXPORT HengeDualMapping *henge_ios_jit_get_mapping(void);
 
@@ -83,6 +84,7 @@ int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0
     c.jit_bytes = jit->size;
     c.jit_rx = jit->rx_addr;
     c.jit_rw = jit->rw_addr;
+    c.gpu3d = gpu3d;
     c.display_kind = display_kind;
     c.panel_w = panel_w;
     c.panel_h = panel_h;
@@ -136,6 +138,8 @@ void henge_winvm_set_display(int kind, uint32_t width, uint32_t height) {
     panel_w = width;
     panel_h = height;
 }
+
+void henge_winvm_set_gpu3d(int enabled) { gpu3d = enabled ? 1 : 0; }
 
 void henge_winvm_set_display_layer(void *layer) { hv_winvm_set_display_layer(layer); }
 

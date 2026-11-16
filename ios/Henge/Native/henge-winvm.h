@@ -21,6 +21,10 @@ int henge_winvm_make_disk(const char *path, uint64_t gb);
    0 ramfb only, 1 virtio-gpu only, 2 both (default). Call before boot. */
 void henge_winvm_set_display(int kind, uint32_t width, uint32_t height);
 
+/* Ask for virgl 3D on the virtio-gpu. Only does something when the app was built
+   with VIRGL=1 and the host context exists; otherwise the machine boots 2D. */
+void henge_winvm_set_gpu3d(int enabled);
+
 /* 0 not started, 1 running, 2 stopped, 3 starting. */
 int henge_winvm_state(void);
 /* A new generation starts with each successful boot. */

@@ -75,7 +75,16 @@ g->rend->submit(ud, ctx_id, cmds, len, flags);
 `hv_virtio_gpu_set_renderer(g, &r)`。**没接的时候** `VIRTIO_GPU_F_VIRGL` 不 advertise，
 所有 3D 命令回 `ERR_UNSPEC`，设备退化成纯 2D —— 驱动不会挂到 error 43 上。
 
-`hv_gpu_renderer_none()` 是现在的占位后端，它一律拒绝。
+后端已经写好：`devices/gpu_renderer_virgl.c`（`#ifdef HV_HAVE_VIRGL`）把 vtable 填成
+`virgl_renderer_*`，`make VIRGL=1` 才编进去并链 `-lvirglrenderer`；否则这个文件只产出一个
+返回 NULL 的工厂，设备退回 2D。开启路径：
+
+```
+HvWinVmConfig.gpu3d = 1 → hv_winvirt_enable_gpu3d → hv_gpu_renderer_virgl()
+```
+
+**还差一步才能真的出 3D**：virgl 需要宿主先建好 EGL/GLES 上下文（UTM 的 Neptune 就是干这个的），
+本树没有这套初始化代码，也没有库，所以 `virgl_renderer_init` 现在必然失败。`hv_gpu_renderer_none()` 是占位后端，一律拒绝。
 
 板子现在有 `HvDisplayKind`：`RAMFB` / `VIRTIO_GPU` / `AUTO`（默认，两者都建）。UI 设置页可选，命令行也可以：
 

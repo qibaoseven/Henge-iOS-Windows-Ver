@@ -52,6 +52,8 @@ struct WinSettingsView: View {
                         Text("仅 virtio-gpu").tag(1)
                         Text("仅 ramfb").tag(0)
                     }
+                    Toggle("3D 加速（virgl）", isOn: $machine.gpu3d)
+                        .disabled(machine.displayKind == 0)
                     Picker("面板分辨率", selection: panelBinding) {
                         ForEach(panelChoices, id: \.self) { size in
                             Text("\(size.0) × \(size.1)").tag("\(size.0)x\(size.1)")
@@ -60,7 +62,7 @@ struct WinSettingsView: View {
                 } header: {
                     Text("显示")
                 } footer: {
-                    Text("Windows 只认 virtio-gpu（1af4:1050，viogpudo 驱动）。ramfb 只有固件和 Linux 认，选“仅 ramfb”时 Windows 装完会没有显示驱动。")
+                    Text("Windows 只认 virtio-gpu（1af4:1050，viogpudo 驱动）。ramfb 只有固件和 Linux 认，选“仅 ramfb”时 Windows 装完会没有显示驱动。3D 需要 App 以 VIRGL=1 构建，否则自动退回 2D。")
                 }
                 .disabled(engine.running)
 

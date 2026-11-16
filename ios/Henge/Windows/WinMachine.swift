@@ -17,6 +17,8 @@ struct WinMachine: Codable, Identifiable, Hashable {
     var displayKind: Int = 2
     var panelW: Int = 1440
     var panelH: Int = 900
+    /// virgl 3D on the virtio-gpu; needs an app built with VIRGL=1.
+    var gpu3d: Bool = false
 
     var folder: URL { WinStore.root.appendingPathComponent(id.uuidString, isDirectory: true) }
     var diskPath: String { folder.appendingPathComponent("disk.img").path }
@@ -47,6 +49,7 @@ struct WinMachine: Codable, Identifiable, Hashable {
         displayKind = try c.decodeIfPresent(Int.self, forKey: .displayKind) ?? 2
         panelW = try c.decodeIfPresent(Int.self, forKey: .panelW) ?? 1440
         panelH = try c.decodeIfPresent(Int.self, forKey: .panelH) ?? 900
+        gpu3d = try c.decodeIfPresent(Bool.self, forKey: .gpu3d) ?? false
     }
 
     init(name: String) { self.name = name }

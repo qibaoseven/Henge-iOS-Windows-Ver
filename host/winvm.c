@@ -212,6 +212,12 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         if (hv_winvirt_attach_cd(&board, c->cd2) != 0)
             return fail(err, errlen, "Cannot open the third CD-ROM image.");
     }
+    /* 3D has to be decided before the first instruction runs: the guest reads the
+       feature bits during reset. A failure here is not fatal -- the device just
+       stays the 2D one it was. */
+    if (c->gpu3d && hv_winvirt_enable_gpu3d(&board) != 0)
+        fprintf(stderr, "winvm: continuing without 3D\n");
+
     hv_winvirt_reset_cpu(&board);
 
     share_on = 0;
@@ -337,6 +343,12 @@ int hv_winvm_run_cpu0(void) {
         if (hv_winvirt_attach_cd(&board, c->cd2) != 0)
             return fail(err, errlen, "Cannot open the third CD-ROM image.");
     }
+    /* 3D has to be decided before the first instruction runs: the guest reads the
+       feature bits during reset. A failure here is not fatal -- the device just
+       stays the 2D one it was. */
+    if (c->gpu3d && hv_winvirt_enable_gpu3d(&board) != 0)
+        fprintf(stderr, "winvm: continuing without 3D\n");
+
     hv_winvirt_reset_cpu(&board);
             m.flush_pending = 1;
             spawn_secondaries();

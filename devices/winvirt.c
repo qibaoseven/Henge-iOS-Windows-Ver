@@ -259,6 +259,18 @@ void hv_winvirt_power_button(HvWinVirt *b) {
    Port 3 of the xHCI is a USB CD-ROM. Nothing else in the machine needs to know
    about it: the firmware finds it during enumeration and boots from it via El
    Torito, and Windows binds cdfs.sys to it because INQUIRY says type 5. */
+int hv_winvirt_enable_gpu3d(HvWinVirt *b) {
+    if (!b->gpu) return -1; /* display_kind said ramfb only */
+    const HvGpuRenderer *r = hv_gpu_renderer_virgl();
+    if (!r) {
+        fprintf(stderr, "winvm: 3D requested but no virglrenderer is linked; staying 2D\n");
+        return -1;
+    }
+    hv_virtio_gpu_set_renderer(b->gpu, r);
+    fprintf(stderr, "winvm: virtio-gpu 3D enabled via %s\n", r->name);
+    return 0;
+}
+
 int hv_winvirt_attach_cd(HvWinVirt *b, const char *iso_path) {
     if (!b || !b->usb) return -1;
     return hv_xhci_attach_cd(b->usb, iso_path);

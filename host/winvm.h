@@ -25,6 +25,7 @@ typedef struct HvWinVmConfig {
     void *prealloc_ram;       /* Optional pre-allocated Guest RAM (ledger-exempt on iOS) */
     int no_net;
     int enable_sound;
+    int gpu3d;                /* ask for virgl on the virtio-gpu; ignored if not linked */
     int display_kind;         /* HvDisplayKind: ramfb / virtio-gpu / both (default) */
     uint32_t panel_w, panel_h; /* what the guest is told the screen is; 0 = 1440x900 */
     int log;

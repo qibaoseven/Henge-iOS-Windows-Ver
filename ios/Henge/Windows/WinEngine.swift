@@ -55,6 +55,7 @@ final class WinEngine: ObservableObject {
         // the panel is -- told to the engine before it builds the board, because
         // a driver asks for a mode long before the UI can react.
         henge_winvm_set_display(Int32(m.displayKind), UInt32(m.panelW), UInt32(m.panelH))
+        henge_winvm_set_gpu3d(m.gpu3d ? 1 : 0)
 
         let ram = UInt64(m.ramMB)
         let cpus = Int32(m.cpus)

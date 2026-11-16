@@ -55,6 +55,10 @@ typedef struct HvGpuRenderer {
     int (*submit)(void *ud, uint32_t ctx_id, const uint8_t *cmds, uint32_t len, uint32_t flags);
 } HvGpuRenderer;
 
+/* The real thing: virglrenderer, if this tree was built with VIRGL=1 and the
+   host has already made its EGL context current. Returns NULL otherwise. */
+const HvGpuRenderer *hv_gpu_renderer_virgl(void);
+
 /* A renderer that accepts nothing, so the device can stay a pure 2D device
    without a NULL check at every call site. */
 const HvGpuRenderer *hv_gpu_renderer_none(void);
