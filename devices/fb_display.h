@@ -30,6 +30,12 @@ typedef struct HvFbDisplay {
 } HvFbDisplay;
 
 HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg);
+/* A scanout the guest put somewhere else (virtio-gpu's resource). Passing NULL
+   detaches it. Both this and ramfb end up as one pointer plus geometry, which is
+   all the presenter needs. */
+int hv_fb_display_set_scanout(HvFbDisplay *fb, const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t stride,
+                              uint32_t fourcc);
+
 /* Thread-safe snapshot of current scanout pointer and dimensions; returns 0 if active, -1 if not yet set. */
 int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride);
 

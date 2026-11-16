@@ -217,6 +217,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     b->net = hv_virtio_net_create(m, b->pcie, mac ? mac : default_mac);
     if (disk0) b->nvme0 = hv_nvme_create(m, b->pcie, disk0, "WIN11IOS01");
     b->usb = hv_xhci_create(m, b->pcie);
+    /* The GPU Windows talks to. ramfb stays for the firmware and for Linux; the
+       two share one scanout in HvFbDisplay, whoever sets it last wins. */
+    b->gpu = hv_virtio_gpu_create(m, b->pcie, b->fb);
     b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
     (void)enable_sound;

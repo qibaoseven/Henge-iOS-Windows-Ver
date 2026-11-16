@@ -73,6 +73,26 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     return fb;
 }
 
+int hv_fb_display_set_scanout(HvFbDisplay *fb, const uint8_t *pixels, uint32_t w, uint32_t h, uint32_t stride,
+                              uint32_t fourcc) {
+    if (!fb) return -1;
+    pthread_mutex_lock(&fb->mu);
+    if (!pixels || !w || !h) {
+        fb->fb_host = NULL;
+        fb->width = fb->height = fb->stride = 0;
+        fb->active = 0;
+    } else {
+        fb->fb_host = pixels;
+        fb->width = w;
+        fb->height = h;
+        fb->stride = stride;
+        fb->fourcc = fourcc;
+        fb->active = 1;
+    }
+    pthread_mutex_unlock(&fb->mu);
+    return 0;
+}
+
 int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride) {
     if (!fb) return -1;
     pthread_mutex_lock(&fb->mu);

@@ -12,7 +12,7 @@ HOST = $(B)/jit_region.o $(B)/enter.o $(B)/disk.o
 WINDEV = $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(B)/pl031.o $(B)/pl061.o $(B)/pcie.o \
          $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_net.o $(B)/virtio_input.o $(B)/virtio_snd.o \
          $(B)/xhci.o $(B)/acpi.o $(B)/nvme.o $(B)/hda.o $(B)/fdt.o $(B)/fw_cfg.o $(B)/pflash.o \
-         $(B)/winvirt.o $(B)/fb_display.o $(B)/usb_storage.o
+         $(B)/winvirt.o $(B)/fb_display.o $(B)/usb_storage.o $(B)/virtio_gpu.o
 # The macOS guest build ("Henge" the app) still ships the Apple GPU path, which
 # the Windows direction does not use.
 DEV = $(WINDEV) $(B)/pvg_metal.o $(B)/pvg_mac.o $(B)/fb_metal.o
