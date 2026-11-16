@@ -359,3 +359,47 @@ FAT32 扁平镜像挂到 NVMe 后，BDS 直接当可启动盘，零风险。
 2. **ESD 的映像序号会漂移**：微软更新目录后，"第 6 个是 Pro"可能变；必须动态扫 `wimlib-imagex info` 的元数据挑 edition，而不是硬编码 6。
 3. **ESD 是加密的可能**：Media Creation Tool 的 ESD 是 LZMS 未加密（wimlib 可读），但如果用户给的是加密 ESD，要先拒绝并提示换源。
 4. **时间**：解 4.5 GB LZMS 在手机上可能 5–15 分钟（IO + 解压），安装本身 1–2 小时。UI 必须给"可以锁屏等着"的语义，并保证 App 不被杀（写 `isIdleTimerDisabled` + 后台宽限，跟 macOS 安装链一致）。
+
+---
+
+## 14. v4：介质全部在 iPad 上准备，App 只负责挂三张 ISO
+
+> 修正 §13 的一个假设。§13 说"WinPE 必须 App 自己从 ESD 解"、ESD 必须 exFAT/自解析 —— 那是建立在不写
+> 文件系统、又要零文件的背景下。用户在 iPad 上已经能拆 SWM、能打 ISO，所以这条路可以整个取消。
+
+### 14.1 分工
+
+| 谁 | 干什么 |
+|---|---|
+| **用户（在 iPad 上，不碰电脑）** | ① ESD 拆成 `install.swm` + `install1.swm`（每片 <4 GB）；② 把两个 swm 打进一张 ISO；③ 准备一张可启动的 ARM64 WinPE ISO |
+| **App** | 挂盘、启动、直通触屏键盘、进度显示；**不解析任何 ISO、不写任何文件系统** |
+| **guest（WinPE）** | 自己读 ISO（inbox USB 存储 + cdfs）、自己 `dism /apply-image`（自动接 `install1.swm`） |
+
+### 14.2 为什么 SWM 拆分是这套方案的关键
+
+ISO9660 单文件 4 GB 上限——如果不拆，`install.esd`（4.5 GB）就必须走 UDF 或 exFAT。拆成两片之后：
+**普通 Joliet ISO 就够**，不用 UDF、不用 exFAT、不用 FAT32 写入器、不用 WIM 读取、不用 ISO 解析。
+两个 swm 放在 ISO 根目录同层，`dism /apply-image /imagefile:E:\install.swm /index:6 /applydir:C:\` 会自动接着读 `install1.swm`。
+
+### 14.3 三张盘
+
+| 盘 | 内容 | 谁做 | 挂法 |
+|---|---|---|---|
+| PE ISO | 可启动 ARM64 WinPE | 用户 | USB CD-ROM，**启动源** |
+| 源 ISO | `install.swm` + `install1.swm` | 用户 | USB CD-ROM |
+| 驱动 ISO | NetKVM + viogpudo + 证书 + `unattend.xml` + `install-drivers.cmd`，约 200 KB | **构建时生成一次，作为 App 资源** | USB CD-ROM |
+
+驱动盘不再运行时生成——**在这台 Linux 上用 `genisoimage` 做一次，提交进仓库当资源**，App 直接挂。这样连 ISO 写入器都不用写。
+
+### 14.4 v4 的代码增量：只剩一个设备
+
+| 模块 | 规模 | 说明 |
+|---|---|---|
+| `devices/usb_storage.c` + xHCI 通用化 | **+800～1200 行** | 目前 xHCI 是 HID 专用的简化实现（`HV_XHCI_PORTS=2` 写死键盘/平板、固定报告数组、无 endpoint context/bulk transfer）；要挂 USB CD 必须改成通用设备模型 + BOT + SCSI CD（照 QEMU `hw/usb/dev-storage.c`、`hw/scsi/scsi-disk.c` 的命令语义） |
+
+**没有**：WIM 读取、ISO 解析、FAT32/exFAT 写入、ISO 写入器。全部消失。
+
+### 14.5 唯一的风险
+
+xHCI 改造是纯设备仿真，**这台 x86 主机跑不起来**（`core/translate.c` 有 aarch64 内联汇编），只能 `-fsyntax-only`；
+BOT 状态机和 SCSI 命令时序的正确性，只能靠真机 + PE 的实际行为来收敛。计划里要预留迭代轮次。
