@@ -29,7 +29,31 @@
 | Debian / Ubuntu | `sudo apt install qemu-efi-aarch64` | `/usr/share/AAVMF/` |
 | Fedora | `sudo dnf install edk2-aarch64` | `/usr/share/edk2/aarch64/` |
 | macOS | `brew install qemu` | `share/qemu/edk2-aarch64-code.fd` |
-| 都没有 | GitHub Actions 的 `macos-14` runner 上跑 `--source` | 见 `.github/workflows/firmware.yml` |
+| 都没有 | GitHub Actions 的 `macos-latest` runner 上跑 `--source` | 见下 |
+
+## 让 CI 编好自己推上去（不用配任何密钥）
+
+`.github/workflows/firmware.yml` 用 `macos-latest`（Apple Silicon，AArch64 原生 XCODE5，
+没有交叉编译器），每次手动触发或用 `tools/build-firmware.sh` 有改动时自动跑：
+
+1. 缓存 `third_party/edk2`，避免每轮重拉 200 MB；
+2. `./tools/build-firmware.sh --source` 编 ArmVirtQemu；
+3. 校验两个 bank 都正好 64 MB、`code.fd` 开头有 `_FVH`，算 SHA256；
+4. **发布到固定的 `firmware-latest` Release**（`--clobber` 覆盖，不会每轮堆 128 MB 历史）。
+
+不需要手工密钥：固件本身不签名（Secure Boot 关着），推 Release 用的是每个工作流都带的
+`secrets.GITHUB_TOKEN`，只需要文件里那句 `permissions: contents: write`。
+
+拉回来：
+
+```sh
+gh release download firmware-latest -p '*.fd' -D out/firmware
+gh release download firmware-latest -p 'SHA256SUMS' -D out/firmware
+shasum -a 256 -c out/firmware/SHA256SUMS
+./tools/stage-app-resources.sh      # 拷进 ios/Henge/Resources/
+```
+
+没有 `gh` 也行：Release 页面上直接下 `code.fd` / `vars.fd`，放进 `out/firmware/`。
 
 ## 固件怎么找到设备
 
