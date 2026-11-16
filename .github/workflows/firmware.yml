@@ -1,0 +1,116 @@
+name: firmware
+
+# Builds the two 64 MB pflash banks the Windows board needs (code.fd / vars.fd)
+# and publishes them as a release asset, so the iPad can just pull them:
+#
+#   gh release download firmware-latest -p '*.fd' -D out/firmware
+#
+# No signing key and no secret to configure: the firmware is not code-signed
+# (Secure Boot off), and the release is published with the token every workflow
+# already has -- it only needs `permissions: contents: write` below.
+
+# Pushing is what triggers it: no manual dispatch needed, and no path filter --
+# any push to the default branches rebuilds, so the asset is never stale.
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: # kept as an escape hatch, not the normal way in
+
+permissions:
+  contents: write # create/update the firmware-latest release
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macos-latest is Apple Silicon: edk2 builds AArch64 natively with XCODE5, so
+    # there is no cross compiler to install and no emulation involved.
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          python3 --version
+          # edk2's BaseTools wants iasl for ACPI tables; ignore a failure here,
+          # edk2 ships a prebuilt one under BaseTools/Bin for most hosts.
+          brew install acpica || true
+          command -v iasl || true
+
+      # edk2 is ~200 MB of clone plus submodules; without a cache each run pays
+      # for it again.
+      - name: Cache edk2
+        uses: actions/cache@v4
+        with:
+          path: third_party/edk2
+          key: edk2-${{ runner.os }}-stable202408-r1
+
+      - name: Build ArmVirtQemu (AARCH64, RELEASE)
+        run: |
+          chmod +x tools/build-firmware.sh
+          ./tools/build-firmware.sh --source
+        env:
+          EDK2: ${{ github.workspace }}/third_party/edk2
+
+      - name: Verify the banks
+        run: |
+          ls -l out/firmware
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, '.')
+          bank = 64 << 20
+          for name in ('code.fd', 'vars.fd'):
+              p = os.path.join('out', 'firmware', name)
+              if not os.path.exists(p):
+                  sys.exit(f'missing {p}')
+              size = os.path.getsize(p)
+              if size != bank:
+                  sys.exit(f'{name} is {size} bytes, expected one 64 MB bank')
+          with open('out/firmware/code.fd', 'rb') as f:
+              head = f.read(0x1000)
+          if b'_FVH' not in head:
+              sys.exit('code.fd has no firmware volume header')
+          print('code.fd: FV header present, 64 MB')
+          print('vars.fd: 64 MB')
+          PY
+          shasum -a 256 out/firmware/*.fd | tee out/firmware/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pflash
+          path: |
+            out/firmware/code.fd
+            out/firmware/vars.fd
+            out/firmware/SHA256SUMS
+          retention-days: 90
+
+      # A fixed tag rather than a new one each run, so "download the latest"
+      # stays one command and does not accumulate 128 MB per build.
+      - name: Publish firmware-latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view firmware-latest >/dev/null 2>&1 \
+            || gh release create firmware-latest \
+                 --title "UEFI pflash (ArmVirtQemu AARCH64)" \
+                 --notes "code.fd / vars.fd, two 64 MB pflash banks. Built from edk2 by .github/workflows/firmware.yml."
+          gh release upload firmware-latest \
+            out/firmware/code.fd out/firmware/vars.fd out/firmware/SHA256SUMS --clobber
+
+      - name: How to pull it
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ### 固件已发布
+          在仓库里拉回三个文件：
+
+          \`\`\`
+          gh release download firmware-latest -p '*.fd' -D out/firmware
+          ./tools/stage-app-resources.sh
+          \`\`\`
+
+          不用先创建工作目录，\`-D\` 会建。校验：\`shasum -a 256 -c out/firmware/SHA256SUMS\`。
+          EOF
