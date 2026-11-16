@@ -54,6 +54,29 @@
 | `bochs-display` | `1234:1111` | Windows 无 ARM64 驱动（VBEMP 是 x86） | 不做 |
 | `qxl` / `stdvga` / `vmware-svga` | — | 全是 x86/x64 驱动或 BIOS 路径 | 不做 |
 
+### 3D 那一半：协议写完了，后端还是空的
+
+`virtio_gpu.c` 现在实现了 3D 的**全部协议面**：`CTX_CREATE` / `CTX_DESTROY` /
+`CTX_ATTACH_RESOURCE` / `RESOURCE_CREATE_3D` / `TRANSFER_TO_HOST_3D` /
+`TRANSFER_FROM_HOST_3D` / `SUBMIT_3D`，`GET_CAPSET_INFO` / `GET_CAPSET` 也从
+"回零"改成了转给后端。真正把 virgl 命令流翻译成 Metal 的部分在
+`devices/gpu_renderer.h` 的 vtable 里：
+
+```c
+g->rend->ctx_create(ud, ctx_id, name, init);
+g->rend->res_create(ud, &info);            // PIPE_TEXTURE_2D ...
+g->rend->transfer_to_host(ud, id, off, level, stride, layer_stride, src, len, box);
+g->rend->submit(ud, ctx_id, cmds, len, flags);
+```
+
+要接 virglrenderer（UTM 的 Neptune 构建里就有），就是把这几个函数填成
+`virgl_renderer_resource_create` / `virgl_renderer_ctx_create` /
+`virgl_renderer_submit_cmd` / `virgl_renderer_transfer_*`，然后
+`hv_virtio_gpu_set_renderer(g, &r)`。**没接的时候** `VIRTIO_GPU_F_VIRGL` 不 advertise，
+所有 3D 命令回 `ERR_UNSPEC`，设备退化成纯 2D —— 驱动不会挂到 error 43 上。
+
+`hv_gpu_renderer_none()` 是现在的占位后端，它一律拒绝。
+
 板子现在有 `HvDisplayKind`：`RAMFB` / `VIRTIO_GPU` / `AUTO`（默认，两者都建）。UI 设置页可选，命令行也可以：
 
 ```sh

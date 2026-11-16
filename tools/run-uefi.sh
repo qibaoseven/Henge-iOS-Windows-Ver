@@ -39,7 +39,7 @@ needs_build=0
 [ -x "$BIN" ] || needs_build=1
 for f in core/classify core/operands core/translate core/dispatch core/memop core/exception core/sysreg core/machine \
          devices/winvirt devices/fdt devices/fw_cfg devices/pflash devices/gicv3 devices/pl011 devices/pl031 \
-         devices/pl061 devices/pcie devices/virtio devices/virtio_net devices/virtio_snd devices/virtio_blk devices/virtio_gpu \
+         devices/pl061 devices/pcie devices/virtio devices/virtio_net devices/virtio_snd devices/virtio_blk devices/virtio_gpu devices/gpu_renderer \
          devices/acpi devices/timer devices/nvme devices/hda devices/xhci devices/fb_display devices/usb_storage \
          host/disk host/jit_region host/main_uefi; do
     o=build/posix/vb_$(basename "$f").o

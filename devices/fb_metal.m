@@ -192,35 +192,40 @@ static atomic_uint_fast64_t g_frames;
     return _texture != nil;
 }
 
-- (void)uploadPixels:(const uint8_t *)pixels
-               width:(uint32_t)w
-              height:(uint32_t)h
-              stride:(uint32_t)stride
-              bytes:(void (^)(id<MTLBlitCommandEncoder> blit))encode {
-    NSUInteger tightRow = (NSUInteger)w * 4u;
-    NSUInteger rows = h;
-    NSUInteger needed = tightRow * rows;
+/* Uploads one rectangle of the frame. A guest with a flush command (virtio-gpu)
+   tells us exactly what moved, so a 4 MB frame usually costs a few rows of
+   memcpy instead of all of it. */
+- (void)uploadRect:(const uint8_t *)pixels
+             width:(uint32_t)w
+             height:(uint32_t)h
+            stride:(uint32_t)stride
+                 x:(uint32_t)x
+                 y:(uint32_t)y
+                rw:(uint32_t)rw
+                rh:(uint32_t)rh
+             bytes:(void (^)(id<MTLBlitCommandEncoder> blit))encode {
+    if (!pixels || !_texture || rw == 0 || rh == 0) return;
+    NSUInteger tightRow = (NSUInteger)rw * 4u;
+    NSUInteger needed = tightRow * (NSUInteger)rh;
     id<MTLBuffer> staging = [_device newBufferWithLength:needed
-                                                 options:MTLResourceStorageModeShared];
+                                                options:MTLResourceStorageModeShared];
     if (!staging) return;
     uint8_t *dst = (uint8_t *)staging.contents;
-    if (stride == tightRow) {
-        memcpy(dst, pixels, needed);
-    } else {
-        for (NSUInteger y = 0; y < rows; y++) {
-            memcpy(dst + y * tightRow, pixels + (uint64_t)y * stride, tightRow);
-        }
+    for (NSUInteger row = 0; row < rh; row++) {
+        memcpy(dst + row * tightRow,
+               pixels + ((uint64_t)y + row) * stride + (uint64_t)x * 4u,
+               tightRow);
     }
     id<MTLCommandBuffer> cb = [_queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromBuffer:staging
             sourceOffset:0
         sourceBytesPerRow:tightRow
-      sourceBytesPerHeight:rows
+      sourceBytesPerHeight:rh
                toTexture:_texture
         destinationSlice:0
         destinationLevel:0
-     destinationOrigin:MTLOriginMake(0, 0, 0)];
+     destinationOrigin:MTLOriginMake(x, y, 0)];
     [blit endEncoding];
     encode(cb);
     [cb commit];
@@ -239,10 +244,33 @@ static atomic_uint_fast64_t g_frames;
     if (!layer) return;
     if (layer.device != _device) [self configureLayer:layer];
 
-    uint64_t sig = [self signatureForPixels:pixels width:w height:h stride:stride];
-    if (_sigValid && sig == _lastSig) return; /* nothing changed */
-    _lastSig = sig;
-    _sigValid = YES;
+    /* A guest that flushes (virtio-gpu) hands us the rectangle it changed. ramfb
+       has no flush at all, so there the signature scan stays as the fallback --
+       that is the honest difference between the two devices. */
+    uint32_t dx = 0, dy = 0, dw = 0, dh = 0;
+    BOOL damaged = hv_fb_display_take_damage(fb, &dx, &dy, &dw, &dh) != 0;
+    BOOL resized = (_texture == nil || _texWidth != w || _texHeight != h);
+    if (resized) {
+        dx = 0;
+        dy = 0;
+        dw = w;
+        dh = h;
+    } else if (!damaged) {
+        uint64_t sig = [self signatureForPixels:pixels width:w height:h stride:stride];
+        if (_sigValid && sig == _lastSig) return; /* nothing changed */
+        _lastSig = sig;
+        _sigValid = YES;
+        dx = 0;
+        dy = 0;
+        dw = w;
+        dh = h;
+    } else {
+        _sigValid = NO; /* the signature no longer describes the texture */
+    }
+    if (dx >= w || dy >= h) return;
+    if (dx + dw > w) dw = w - dx;
+    if (dy + dh > h) dh = h - dy;
+    if (dw == 0 || dh == 0) return;
 
     if (![self ensureTextureForWidth:w height:h]) return;
 
@@ -253,15 +281,15 @@ static atomic_uint_fast64_t g_frames;
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (!drawable) return; /* window minimised or occluded */
 
-    __block BOOL uploaded = NO;
-    [self uploadPixels:pixels
-                 width:w
-                height:h
-                stride:stride
-                 bytes:^(id<MTLCommandBuffer> cb) {
-                     uploaded = YES;
-                 }];
-    if (!uploaded) return;
+    [self uploadRect:pixels
+                width:w
+               height:h
+               stride:stride
+                    x:dx
+                    y:dy
+                   rw:dw
+                   rh:dh
+                bytes:^(id<MTLCommandBuffer> cb){}];
 
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = drawable.texture;

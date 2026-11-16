@@ -18,6 +18,21 @@
 #define GPU_CMD_GET_CAPSET 0x0109
 #define GPU_CMD_GET_EDID 0x010a
 
+/* 3D: same protocol, a renderer behind it. */
+#define GPU_CMD_CTX_CREATE 0x0200
+#define GPU_CMD_CTX_DESTROY 0x0201
+#define GPU_CMD_CTX_ATTACH_RESOURCE 0x0202
+#define GPU_CMD_CTX_DETACH_RESOURCE 0x0203
+#define GPU_CMD_RESOURCE_CREATE_3D 0x0204
+#define GPU_CMD_TRANSFER_TO_HOST_3D 0x0205
+#define GPU_CMD_TRANSFER_FROM_HOST_3D 0x0206
+#define GPU_CMD_SUBMIT_3D 0x0207
+
+#define GPU_CMD_UPDATE_CURSOR 0x0300
+#define GPU_CMD_MOVE_CURSOR 0x0301
+
+#define VIRTIO_GPU_F_VIRGL (1ull << 0)
+
 #define GPU_RESP_OK_NODATA 0x1100
 #define GPU_RESP_OK_DISPLAY_INFO 0x1101
 #define GPU_RESP_OK_CAPSET_INFO 0x1102
@@ -98,6 +113,75 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     GpuHdr hdr;
+    uint32_t ctx_id; /* a resource id in the spec, but it identifies the context */
+    char debug_name[64];
+    uint32_t context_init;
+} GpuCtxCreateCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t ctx_id;
+} GpuCtxDestroyCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t ctx_id;
+    uint32_t resource_id;
+} GpuCtxResourceCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t resource_id;
+    uint32_t target;
+    uint32_t format;
+    uint32_t bind;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t array_size;
+    uint32_t last_level;
+    uint32_t nr_samples;
+    uint32_t flags;
+} GpuCreate3DCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t box[6]; /* x, y, z, w, h, d */
+    uint64_t offset;
+    uint32_t resource_id;
+    uint32_t level;
+    uint32_t stride;
+    uint32_t layer_stride;
+} GpuTransfer3DCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t size;
+    uint32_t padding;
+    uint32_t flags;
+} GpuSubmit3DCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t pos[2];
+    uint32_t resource_id;
+    uint32_t hot_x;
+    uint32_t hot_y;
+} GpuUpdateCursorCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t pos[2];
+} GpuMoveCursorCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
+    uint32_t capset_id;
+    uint32_t capset_version;
+} GpuGetCapsetCmd;
+
+typedef struct __attribute__((packed)) {
+    GpuHdr hdr;
     GpuDisplayOne pmodes[16];
 } GpuDisplayInfoResp;
 
@@ -120,6 +204,13 @@ _Static_assert(sizeof(GpuTransferCmd) == 56, "transfer_to_host_2d is 56 bytes");
 _Static_assert(sizeof(GpuAttachCmd) == 32, "resource_attach_backing is 32 bytes");
 _Static_assert(sizeof(GpuMemEntry) == 16, "mem_entry is 16 bytes");
 _Static_assert(sizeof(GpuDisplayInfoResp) == 408, "display info carries 16 pmodes");
+_Static_assert(sizeof(GpuCtxCreateCmd) == 96, "ctx_create is 96 bytes");
+_Static_assert(sizeof(GpuCtxDestroyCmd) == 28, "ctx_destroy is 28 bytes");
+_Static_assert(sizeof(GpuCtxResourceCmd) == 32, "ctx_attach_resource is 32 bytes");
+_Static_assert(sizeof(GpuCreate3DCmd) == 68, "resource_create_3d is 68 bytes");
+_Static_assert(sizeof(GpuTransfer3DCmd) == 72, "transfer_*_3d is 72 bytes");
+_Static_assert(sizeof(GpuSubmit3DCmd) == 36, "submit_3d is 36 bytes");
+_Static_assert(sizeof(GpuUpdateCursorCmd) == 44, "update_cursor is 44 bytes");
 
 /* Formats we actually store. The guest's buffers are always 32 bits per pixel. */
 #define GPU_FMT_B8G8R8A8 1
@@ -180,7 +271,8 @@ static void res_free(HvGpuRes *r) {
     memset(r, 0, sizeof *r);
 }
 
-static uint32_t handle(HvVirtioGpu *g, const HvVirtqElem *e, GpuHdr *resp, uint32_t resp_cap) {
+static uint32_t handle(HvVirtioGpu *g, const HvVirtqElem *e, uint8_t *resp_buf, uint32_t resp_cap) {
+    GpuHdr *resp = (GpuHdr *)resp_buf;
     GpuHdr req;
     if (hv_virtq_read(&g->v, e, 0, &req, sizeof req) != sizeof req) {
         gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, NULL);
@@ -217,18 +309,296 @@ static uint32_t handle(HvVirtioGpu *g, const HvVirtqElem *e, GpuHdr *resp, uint3
         return sizeof *r;
     }
     case GPU_CMD_GET_CAPSET_INFO: {
+        if (!g->rend || !g->rend->capset_info) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        uint32_t id = 0, ver = 0, size = 0;
+        if (g->rend->capset_info(g->rend->ud, &id, &ver, &size) != 0) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
         GpuCapsetInfoResp *r = (GpuCapsetInfoResp *)resp;
         gpu_hdr(&r->hdr, GPU_RESP_OK_CAPSET_INFO, &req);
-        r->capset_id = 0;
-        r->capset_max_version = 0;
-        r->capset_max_size = 0;
+        r->capset_id = id;
+        r->capset_max_version = ver;
+        r->capset_max_size = size;
         return sizeof *r;
+    }
+
+    case GPU_CMD_GET_CAPSET: {
+        GpuGetCapsetCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!g->rend || !g->rend->capset) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        uint32_t out_len = resp_cap > sizeof(GpuHdr) ? resp_cap - (uint32_t)sizeof(GpuHdr) : 0;
+        GpuHdr *h = (GpuHdr *)resp_buf;
+        gpu_hdr(h, GPU_RESP_OK_CAPSET, &req);
+        if (g->rend->capset(g->rend->ud, c.capset_id, c.capset_version, out_len, resp_buf + sizeof(GpuHdr),
+                            &out_len) != 0) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        h->type = GPU_RESP_OK_CAPSET;
+        return (uint32_t)sizeof(GpuHdr) + out_len;
     }
     case GPU_CMD_GET_EDID:
         /* We do not advertise VIRTIO_GPU_F_EDID, so this should never arrive; if
            it does, saying "no EDID" is better than sending a made-up one. */
         gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
         return sizeof(GpuHdr);
+
+    /* ---- 3D: pass the command stream to the renderer, keep the ids honest ---- */
+
+    case GPU_CMD_CTX_CREATE: {
+        GpuCtxCreateCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!g->rend || !g->rend->ctx_create) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        for (int i = 0; i < HV_GPU_MAX_CTX; i++)
+            if (g->ctx[i].used && g->ctx[i].id == c.ctx_id) {
+                gpu_hdr(resp, GPU_RESP_ERR_INVALID_CONTEXT_ID, &req);
+                return sizeof(GpuHdr);
+            }
+        int slot = -1;
+        for (int i = 0; i < HV_GPU_MAX_CTX && slot < 0; i++)
+            if (!g->ctx[i].used) slot = i;
+        if (slot < 0) {
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        char name[65];
+        memcpy(name, c.debug_name, 64);
+        name[64] = 0;
+        if (g->rend->ctx_create(g->rend->ud, c.ctx_id, name, c.context_init) != 0) {
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        g->ctx[slot].used = 1;
+        g->ctx[slot].id = c.ctx_id;
+        fprintf(stderr, "virtio-gpu: context %u '%s'\n", c.ctx_id, name);
+        gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
+        return sizeof(GpuHdr);
+    }
+
+    case GPU_CMD_CTX_DESTROY: {
+        GpuCtxDestroyCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        for (int i = 0; i < HV_GPU_MAX_CTX; i++)
+            if (g->ctx[i].used && g->ctx[i].id == c.ctx_id) {
+                g->ctx[i].used = 0;
+                if (g->rend && g->rend->ctx_destroy) g->rend->ctx_destroy(g->rend->ud, c.ctx_id);
+                gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
+                return sizeof(GpuHdr);
+            }
+        gpu_hdr(resp, GPU_RESP_ERR_INVALID_CONTEXT_ID, &req);
+        return sizeof(GpuHdr);
+    }
+
+    case GPU_CMD_CTX_ATTACH_RESOURCE:
+    case GPU_CMD_CTX_DETACH_RESOURCE: {
+        GpuCtxResourceCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        int ctx_ok = 0;
+        for (int i = 0; i < HV_GPU_MAX_CTX; i++)
+            if (g->ctx[i].used && g->ctx[i].id == c.ctx_id) ctx_ok = 1;
+        if (!ctx_ok) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_CONTEXT_ID, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!find(g, c.resource_id)) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_RESOURCE_ID, &req);
+            return sizeof(GpuHdr);
+        }
+        /* The renderer sees every submit with a context, so it can find its own
+           resources; the device only has to know both ids exist. */
+        gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
+        return sizeof(GpuHdr);
+    }
+
+    case GPU_CMD_RESOURCE_CREATE_3D: {
+        GpuCreate3DCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!g->rend || !g->rend->res_create) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        if (find(g, c.resource_id)) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_RESOURCE_ID, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!c.width || !c.height || c.width > 16384 || c.height > 16384 || c.array_size > 64 ||
+            c.last_level > 15) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_PARAM, &req);
+            return sizeof(GpuHdr);
+        }
+        HvGpuRes *slot = NULL;
+        for (int i = 0; i < HV_GPU_MAX_RES && !slot; i++)
+            if (!g->res[i].used) slot = &g->res[i];
+        if (!slot) {
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        HvGpuRes3DInfo info = {
+            .resource_id = c.resource_id,
+            .target = c.target,
+            .format = c.format,
+            .bind = c.bind,
+            .width = c.width,
+            .height = c.height,
+            .depth = c.depth,
+            .array_size = c.array_size,
+            .last_level = c.last_level,
+            .nr_samples = c.nr_samples,
+            .flags = c.flags,
+        };
+        memset(slot, 0, sizeof *slot);
+        if (g->rend->res_create(g->rend->ud, &info) != 0) {
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        *slot = (HvGpuRes){.used = 1, .is3d = 1, .id = c.resource_id, .format = c.format,
+                           .width = c.width, .height = c.height, .target = c.target, .bind = c.bind,
+                           .depth = c.depth, .array_size = c.array_size, .last_level = c.last_level,
+                           .nr_samples = c.nr_samples, .gpu_flags = c.flags};
+        gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
+        return sizeof(GpuHdr);
+    }
+
+    case GPU_CMD_TRANSFER_TO_HOST_3D:
+    case GPU_CMD_TRANSFER_FROM_HOST_3D: {
+        GpuTransfer3DCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        HvGpuRes *r = find(g, c.resource_id);
+        if (!r || !r->is3d || !r->attached) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_RESOURCE_ID, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!g->rend) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        /* Bytes to move: the box's rows are `stride` apart in the guest's backing
+           and `layer_stride` apart per layer. TEXTURE_2D uploads are by far the
+           common case, and that is rows. */
+        uint32_t row_bytes = c.box[3] * 4;
+        if (row_bytes == 0 || c.box[4] == 0) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_PARAM, &req);
+            return sizeof(GpuHdr);
+        }
+        uint32_t box[6];
+        memcpy(box, c.box, sizeof box);
+        uint32_t stride = c.stride ? c.stride : row_bytes;
+        uint32_t layers = c.box[5] ? c.box[5] : 1;
+        uint64_t total = (uint64_t)stride * c.box[4] * layers;
+        if (total > (4u << 20)) { /* a bounce copy this big is a bug, not a texture */
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        uint8_t *bounce = malloc((size_t)total);
+        if (!bounce) {
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        int rc = 0;
+        if (type == GPU_CMD_TRANSFER_TO_HOST_3D) {
+            if (res_read(g, r, c.offset, bounce, (uint32_t)total) != 0 ||
+                g->rend->transfer_to_host(g->rend->ud, c.resource_id, c.offset, c.level, stride,
+                                          c.layer_stride, bounce, (uint32_t)total, box) != 0)
+                rc = -1;
+        } else {
+            if (!g->rend->transfer_from_host ||
+                g->rend->transfer_from_host(g->rend->ud, c.resource_id, c.offset, c.level, stride,
+                                            c.layer_stride, bounce, (uint32_t)total, box) != 0)
+                rc = -1;
+            /* The renderer handed us pixels; the guest gets them through the same
+               linear offset the transfer named. Writing them back needs a scatter
+               write, which the element already gives us as a readable segment. */
+            if (rc == 0) {
+                uint32_t done = 0;
+                for (int sg = 0; sg < e->nseg && done < total; sg++) {
+                    const HvVirtqSeg *seg = &e->seg[sg];
+                    if (seg->write) continue;
+                    uint8_t *p = hv_phys_ptr(g->v.m, seg->addr, seg->len);
+                    if (!p) {
+                        rc = -1;
+                        break;
+                    }
+                    uint32_t n = seg->len;
+                    if (n > total - done) n = (uint32_t)(total - done);
+                    memcpy(p, bounce + done, n);
+                    done += n;
+                }
+                if (done < total) rc = -1;
+            }
+        }
+        free(bounce);
+        gpu_hdr(resp, rc == 0 ? GPU_RESP_OK_NODATA : GPU_RESP_ERR_UNSPEC, &req);
+        return sizeof(GpuHdr);
+    }
+
+    case GPU_CMD_SUBMIT_3D: {
+        GpuSubmit3DCmd c;
+        if (hv_virtq_read(&g->v, e, 0, &c, sizeof c) != sizeof c) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        /* submit_3d carries no context field of its own: the context is in the
+           common header, which is also where the fence id lives. */
+        int ctx_ok = 0;
+        for (int i = 0; i < HV_GPU_MAX_CTX; i++)
+            if (g->ctx[i].used && g->ctx[i].id == req.ctx_id) ctx_ok = 1;
+        if (!ctx_ok) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_CONTEXT_ID, &req);
+            return sizeof(GpuHdr);
+        }
+        if (!g->rend || !g->rend->submit) {
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        /* The command stream follows the header, in the element's readable part.
+           submit_3d streams can be tens of KB; cap the bounce at one MB. */
+        if (c.size == 0 || c.size > (1u << 20)) {
+            gpu_hdr(resp, GPU_RESP_ERR_INVALID_PARAM, &req);
+            return sizeof(GpuHdr);
+        }
+        uint8_t *cmds = malloc(c.size);
+        if (!cmds) {
+            gpu_hdr(resp, GPU_RESP_ERR_OUT_OF_RESOURCES, &req);
+            return sizeof(GpuHdr);
+        }
+        if (hv_virtq_read(&g->v, e, (uint32_t)sizeof c, cmds, c.size) != c.size ||
+            g->rend->submit(g->rend->ud, req.ctx_id, cmds, c.size, c.flags) != 0) {
+            free(cmds);
+            gpu_hdr(resp, GPU_RESP_ERR_UNSPEC, &req);
+            return sizeof(GpuHdr);
+        }
+        free(cmds);
+        gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
+        return sizeof(GpuHdr);
+    }
 
     case GPU_CMD_RESOURCE_CREATE_2D: {
         GpuCreate2DCmd c;
@@ -279,6 +649,12 @@ static uint32_t handle(HvVirtioGpu *g, const HvVirtqElem *e, GpuHdr *resp, uint3
         HvGpuRes *r = find(g, id);
         if (!r) {
             gpu_hdr(resp, GPU_RESP_ERR_INVALID_RESOURCE_ID, &req);
+            return sizeof(GpuHdr);
+        }
+        if (r->is3d) {
+            if (g->rend && g->rend->res_unref) g->rend->res_unref(g->rend->ud, id);
+            res_free(r);
+            gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
             return sizeof(GpuHdr);
         }
         if (g->scanout_res == id) {
@@ -429,14 +805,17 @@ static uint32_t handle(HvVirtioGpu *g, const HvVirtqElem *e, GpuHdr *resp, uint3
             return sizeof(GpuHdr);
         }
         /* The scanout points straight at the resource, so the pixels are already
-           where the presenter reads them; the flush only has to tell a dirty
-           rectangle it can ignore. */
+           where the presenter reads them; the flush is exactly the damage
+           rectangle, and handing it over is what makes a 2D guest cheap to show:
+           the presenter uploads the rows that moved instead of the whole frame. */
+        if (g->scanout_res == id && g->fb)
+            hv_fb_display_damage(g->fb, c.rect.x, c.rect.y, c.rect.width, c.rect.height);
         gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
         return sizeof(GpuHdr);
     }
 
     default:
-        if (type >= 0x0200 && type <= 0x0203) { /* cursor queue commands */
+        if (type == GPU_CMD_UPDATE_CURSOR || type == GPU_CMD_MOVE_CURSOR) {
             gpu_hdr(resp, GPU_RESP_OK_NODATA, &req);
             return sizeof(GpuHdr);
         }
@@ -450,10 +829,19 @@ static void drain(HvVirtioGpu *g, int qi) {
     HvVirtqElem e;
     int got;
     while ((got = hv_virtq_pop(&g->v, qi, &e)) > 0) {
-        GpuHdr resp;
         uint32_t cap = hv_virtq_writable(&e);
-        uint32_t written = handle(g, &e, &resp, cap);
-        hv_virtq_write(&g->v, &e, 0, &resp, written);
+        /* GET_CAPSET can be a few KB, so the response buffer follows the driver's
+           writable size and never assumes a fixed layout. */
+        uint32_t bufsz = cap > 8192 ? cap : 8192;
+        uint8_t *buf = malloc(bufsz);
+        if (!buf) {
+            hv_virtq_push(&g->v, qi, &e, 0);
+            continue;
+        }
+        uint32_t written = handle(g, &e, buf, bufsz);
+        if (written > cap) written = cap;
+        hv_virtq_write(&g->v, &e, 0, buf, written);
+        free(buf);
         hv_virtq_push(&g->v, qi, &e, written);
         hv_virtio_interrupt(&g->v);
     }
@@ -463,6 +851,20 @@ static void drain(HvVirtioGpu *g, int qi) {
 static void on_notify(HvVirtio *v, int q) {
     HvVirtioGpu *g = v->dev;
     if (q == 0 || q == 1) drain(g, q);
+}
+
+void hv_virtio_gpu_set_renderer(HvVirtioGpu *g, const HvGpuRenderer *r) {
+    if (!g) return;
+    /* The guest negotiates features during reset, so this must happen before it
+       starts. With no renderer the bit stays off and the device is 2D only --
+       a driver that cannot get a capset would otherwise fail with error 43. */
+    if (r) {
+        g->rend = r;
+        g->v.features |= VIRTIO_GPU_F_VIRGL;
+    } else {
+        g->rend = NULL;
+        g->v.features &= ~VIRTIO_GPU_F_VIRGL;
+    }
 }
 
 HvVirtioGpu *hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb) {
@@ -478,6 +880,7 @@ HvVirtioGpu *hv_virtio_gpu_create(HvMachine *m, HvPcie *bus, HvFbDisplay *fb) {
         free(g);
         return NULL;
     }
-    fprintf(stderr, "virtio-gpu: 1af4:1050 attached, 2D only (%d slots)\n", HV_GPU_MAX_RES);
+    fprintf(stderr, "virtio-gpu: 1af4:1050 attached (%d resources, %d contexts, %s)\n", HV_GPU_MAX_RES,
+            HV_GPU_MAX_CTX, g->rend ? "2D+3D" : "2D only");
     return g;
 }

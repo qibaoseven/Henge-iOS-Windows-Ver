@@ -73,6 +73,46 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     return fb;
 }
 
+void hv_fb_display_damage(HvFbDisplay *fb, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!fb || !w || !h) return;
+    pthread_mutex_lock(&fb->mu);
+    if (!fb->dirty) {
+        fb->dirty_x = x;
+        fb->dirty_y = y;
+        fb->dirty_w = w;
+        fb->dirty_h = h;
+        fb->dirty = 1;
+    } else {
+        uint32_t x0 = fb->dirty_x < x ? fb->dirty_x : x;
+        uint32_t y0 = fb->dirty_y < y ? fb->dirty_y : y;
+        uint32_t x1a = fb->dirty_x + fb->dirty_w, x1b = x + w;
+        uint32_t y1a = fb->dirty_y + fb->dirty_h, y1b = y + h;
+        uint32_t x1 = x1a > x1b ? x1a : x1b;
+        uint32_t y1 = y1a > y1b ? y1a : y1b;
+        fb->dirty_x = x0;
+        fb->dirty_y = y0;
+        fb->dirty_w = x1 - x0;
+        fb->dirty_h = y1 - y0;
+    }
+    pthread_mutex_unlock(&fb->mu);
+}
+
+int hv_fb_display_take_damage(HvFbDisplay *fb, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h) {
+    if (!fb) return 0;
+    int had;
+    pthread_mutex_lock(&fb->mu);
+    had = fb->dirty;
+    if (had) {
+        *x = fb->dirty_x;
+        *y = fb->dirty_y;
+        *w = fb->dirty_w;
+        *h = fb->dirty_h;
+        fb->dirty = 0;
+    }
+    pthread_mutex_unlock(&fb->mu);
+    return had;
+}
+
 void hv_fb_display_set_hint(HvFbDisplay *fb, uint32_t w, uint32_t h) {
     if (!fb || w < 64 || h < 64 || w > 8192 || h > 8192) return;
     pthread_mutex_lock(&fb->mu);
@@ -90,6 +130,13 @@ int hv_fb_display_set_scanout(HvFbDisplay *fb, const uint8_t *pixels, uint32_t w
         fb->width = fb->height = fb->stride = 0;
         fb->active = 0;
     } else {
+        if (fb->fb_host != pixels || fb->width != w || fb->height != h) {
+            fb->dirty = 1;
+            fb->dirty_x = 0;
+            fb->dirty_y = 0;
+            fb->dirty_w = w;
+            fb->dirty_h = h;
+        }
         fb->fb_host = pixels;
         fb->width = w;
         fb->height = h;

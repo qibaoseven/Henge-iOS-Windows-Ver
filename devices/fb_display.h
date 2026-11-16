@@ -29,6 +29,12 @@ typedef struct HvFbDisplay {
        reports this through GET_DISPLAY_INFO, and the firmware's GOP may pick it. */
     uint32_t hint_w, hint_h;
 
+    /* Damage rectangle: the union of everything written since the presenter last
+       took it. Guests with a flush command (virtio-gpu) know this exactly; ramfb
+       does not, and leaves `dirty` clear so the presenter falls back to scanning. */
+    int dirty;
+    uint32_t dirty_x, dirty_y, dirty_w, dirty_h;
+
     /* Metal presenter handle (created lazily by fb_metal.m) */
     void *metal;
 } HvFbDisplay;
@@ -42,6 +48,11 @@ int hv_fb_display_set_scanout(HvFbDisplay *fb, const uint8_t *pixels, uint32_t w
 /* The panel's preferred geometry, for guests that ask before they set a mode.
    Call before the CPU starts. */
 void hv_fb_display_set_hint(HvFbDisplay *fb, uint32_t w, uint32_t h);
+
+/* Mark a rectangle as changed (union with what is already pending). */
+void hv_fb_display_damage(HvFbDisplay *fb, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+/* Take the pending rectangle, clearing it. Returns 0 when there is none. */
+int hv_fb_display_take_damage(HvFbDisplay *fb, uint32_t *x, uint32_t *y, uint32_t *w, uint32_t *h);
 
 /* Thread-safe snapshot of current scanout pointer and dimensions; returns 0 if active, -1 if not yet set. */
 int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride);
