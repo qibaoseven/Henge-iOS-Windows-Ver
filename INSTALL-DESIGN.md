@@ -234,3 +234,46 @@ FAT32 扁平镜像挂到 NVMe 后，BDS 直接当可启动盘，零风险。
 4. `unattend.xml` 与自动装驱动脚本
 5. ESD 盘（按决策 1）→ 真机冒烟
 6. （M4）`devices/virtio_gpu.c` + `viogpudo` 自动装 → 2D 升级
+
+---
+
+## 12. 参考：Apple VM（zktfjcksxk-spec/AppleVM）的显卡与安装路径
+
+> 同源项目：WindowsiOS（`ammaarreshi/WindowsiOS`，基于 Henge）的修改版，GPL-2.0。它跑通了
+> **Windows 11 ARM64 的 DirectX 11**，所以它的做法可以直接照搬。
+
+### 12.1 显卡驱动是怎么拿到的（不是自研）
+
+| 层 | 内容 | 来源 | 许可 |
+|---|---|---|---|
+| Windows 侧驱动 | **viogpu3d v0.5** + **Neptune UMD** | `osy/kvm-guest-drivers-windows`、`osy/virtio-win-mesa`，**原样二进制**打进 `winkit/viogpu3d/` | BSD-3-Clause / MIT |
+| 网卡驱动 | NetKVM ARM64 | Red Hat `virtio-win/kvm-guest-drivers-windows`，原样 | BSD-3-Clause |
+| 宿主渲染器 | **virglrenderer（Neptune）**，UTM 的 `neptune` 分支 | `utmapp/virglrenderer`（MIT）；预编译 framework 取自 UTM iOS v5.0.8 | MIT |
+| D3D11 → Metal | **DXMT** | `3Shain/dxmt` | LGPL（独立可替换 framework） |
+| GLES → Metal | ANGLE | chromium angle | BSD-3 |
+| Vulkan → Metal | MoltenVK + **KosmicKrisp**（Mesa 的 Vulkan-on-Metal，**二进制打补丁**：`kk_image_layout_init` 两条指令） | `gitlab.freedesktop.org/osy/mesa` | MIT |
+| 引擎侧设备 | **`devices/virtio_gpu3d.c`**，照 QEMU `hw/display/virtio-gpu-virgl.c` 的设计；`devices/virglrenderer.h` 是 virglrenderer 的公开头 | `utmapp/qemu` fork | GPL-2.0 |
+
+也就是说：**驱动是"拿现成的"，不是编译出来的**；真正的工作量在宿主侧的 `virtio_gpu3d.c` + virgl 接线 + Metal 呈现。
+它整套源码在 `source/windowsios-full.patch`（GPL-2.0，基于 WindowsiOS `0071d69`），我们同源，可以直接读来移植。
+
+### 12.2 它怎么装 Windows（和我们的方案根本不同）
+
+- **不在设备上装**：在 Mac 上编译同一个模拟器的 `build/winvm`，跑 `scripts/provision_windows_arm64.py`，
+  两阶段无人值守（阶段 1 ≤150 分钟：WinPE 分区 + **DISM** 写盘 + 写启动项 + 关机；阶段 2 ≤240 分钟：OOBE 自动登录 + 关机），
+  产出 `code.fd` / `vars.fd` / `windows11.img` → `hvsparse pack` 成 `windows11.hvsparse`。
+- 设备上只做：导入三个文件 → 开 JIT → 启动 → 在 Windows 里双击 `START.bat` 装驱动。
+- 它自己写明：**"能不能不用 Mac？制作这一步不行"**。
+- 两个可直接借鉴的点：
+  1. `vars.fd` 必须带上 Windows 的启动项，换空白 NVRAM 就进不了系统 —— 对应我们要处理的 boot order。
+  2. 它的阶段 1/2 全自动、还带截图进度 —— 说明"WinPE + DISM + bcdboot + unattend"这条链可以完全脚本化。
+     我们的阶段 2 现在是手工 DiskGenius/WinNTSetup，**可以改成自动**（自解 ESD 里的 WinPE 镜像 + 自带 autorun 脚本），
+     那样用户只需要给一个 ESD 文件。
+
+### 12.3 已知限制（照搬时要一起接受）
+
+- 最高 **DirectX 11（feature level 11_0）**，无 DX12；DXMT 被刻意限制在 11.0，否则 Windows 拒绝驱动。
+- 显存窗口 **512 MB**（受 App 地址空间限制）。
+- 8 GB 内存需要 **Increased Memory Limit** 能力，否则自动降到 4–5 GB，3D 可能加载失败。
+- 开 3D 后可能黑屏 → 用 `Shared/gpu3d.on` 开关回退到基本显示；**不要禁用 Microsoft Basic Display Driver**。
+- Windows 自带"重启"偶发卡黑屏，关机正常。
