@@ -1,215 +1,236 @@
-# Windows 11 ARM64 安装流程设计（四阶段 / 三页面 + 会话页）
+# Windows 11 ARM64 安装流程设计（v2：驱动内置，四阶段 → 三步文件）
 
-> 设计稿，2026-11-16。基于 `qibaoseven/Henge-iOS-Windows-Ver` 当前代码（HEAD `4a6cda5`）。
-> 目标：iPhone/iPad 上装 Windows 11 ARM64，**全程可见、可操作、可重来**；不追求"一键装完"。
+> 2026-11-16，第二版。基于 `qibaoseven/Henge-iOS-Windows-Ver`（HEAD `4a6cda5`）。
+> v2 的变化：**驱动不再让用户下载**。显卡/网卡驱动直接打进 App，自动安装。
+> 用户要准备的东西从 3 份（ESD / WinPE / virtio ISO）降到 **2 份（ESD / WinPE）**。
 
 ---
 
-## 0. 目标与不变量
+## 0. 结论先行：显卡驱动查到什么
+
+| 问 | 答 |
+|---|---|
+| 仓库里有没有 virtio 显卡驱动 | **没有**。全树 0 个 `.inf/.sys/.cat`；`third_party/` 只有恢复镜像、网络、plist 那些 |
+| 引擎里有没有 virtio-gpu 设备 | **没有**。显示只有 `devices/fb_display.c`（ramfb，EDK2 GOP 写 `etc/ramfb`） |
+| ARM64 有没有 2D 显卡驱动 | **有**：virtio-win 里存在 `viogpudo\w11\ARM64`（`viogpudo.inf`），Windows 11 ARM64 可用；**它是 DOD（Display Only Driver），只有 2D** |
+| ARM64 有没有 3D 显卡驱动 | **没有可用的**。见 §7.3 |
+| UTM 能借到什么 | UTM 的 GPU 加速只对 **Linux 访客**（virgl/venus）开放；Windows 访客官方不提供 DX/GL 3D，官方也把 GPU 加速默认关掉了 |
+
+所以"把驱动全合并进 App、用户不用下载"这件事 **2D 成立、3D 不成立**：
+- **能内置**：`viogpudo`（显示，2D）、`NetKVM`（网卡）、证书；
+- **不能内置**：任何能跑 3D 的 Windows ARM64 驱动 —— 市面上不存在。
+
+---
+
+## 1. 目标与不变量
 
 | 项 | 值 |
 |---|---|
 | 目标 guest | Windows 11 ARM64 |
-| 内存 | 默认 **6 GB**（页 3 可调），装 PE 与装系统都用这个值 |
-| 系统盘 | 稀疏镜像，默认 **32 GB**（页 3 的输入框决定） |
-| 设备 | NVMe（系统盘）、xHCI（键鼠）、ramfb（画面）、HDA、virtio-net（装完驱动后可用） |
-| 没有的东西 | 无 hypervisor、无 EL2（Hyper-V/WSL2/VBS 用不了）、**无 TPM**（Win11 必须绕过）、无 AArch32 |
-| 依赖 | EDK2 ArmVirtQemu 双 pflash + ACPI（已有），ramfb 画面通路 |
+| 内存 | 默认 **6 GB**（页 3 可调） |
+| 系统盘 | 稀疏镜像，默认 **32 GB**（页 2 的输入框） |
+| 设备 | NVMe（系统盘）、xHCI（键鼠）、ramfb **+ virtio-gpu（新）**、HDA、virtio-net |
+| 没有 | 无 hypervisor、无 EL2（无 Hyper-V/WSL2/VBS）、**无 TPM**、无 AArch32 |
+| 用户要准备 | **2 个文件**：Win11 ARM64 ESD、WinPE（ARM64） |
 
 ---
 
-## 1. 三个页面 + 会话页
+## 2. 三个页面 + 会话页
 
-| # | 页面 | 现状 | 改法 |
-|---|---|---|---|
-| 1 | **首页** `HomeView` | Mac 列表 + "Install macOS" | 保留结构；列表项加状态徽标（准备中 / 装系统中 / 可用），入口文案改成 "Install Windows 11" |
-| 2 | **安装页** `InstallView` | 选 macOS 版本、内存滑杆、JIT 检查、空间预检、下载进度 | **整体重写**：只有一个"分配空间"输入框（默认 32 GB，步进 4 GB）+ 下方一个大按钮"开始安装"；再往下是**三份文件的准备清单**（见阶段 1），不出现版本下拉、不出现内存滑杆（内存挪到页 3） |
-| 3 | **设置页** `MacSettingsView` | 内存 / CPU / 分辨率 / 手势 / 颜色 | 保留并改：内存默认 **6 GB**（范围 4–10），CPU 默认 4，分辨率默认跟随设备；新增"介质"分组，显示 PE / ESD / virtio 三个文件的路径与校验状态；原来 macOS 专属项（颜色匹配、Magic Trackpad 模式）隐藏 |
-| 4 | **会话页** `SessionView` | macOS 桌面 + 触屏当 Magic Trackpad 2 | 保留并改：Windows 桌面；触屏 = **绝对定位鼠标**（点即左键、长按拖动、两指点右键）；底部一行虚拟键盘（Esc/Tab/Ctrl/Win/Alt + 字母区）；右上角显示当前阶段；阶段 2 时底部常驻一张"操作卡片"（DiskGenius → WinNTSetup → 关机） |
-
-> 说明：你说"三个界面"，我把会话页单独算一类（它是运行态，不是配置态）。如果会话页也要算进去，那第 1 页可以合并进首页。
+| # | 页面 | 改法 |
+|---|---|---|
+| 1 | 首页 | 保留；入口改 "Install Windows 11"，列表加状态徽标 |
+| 2 | **安装页** | **整体重写**：一个"分配空间"输入框（默认 32 GB）+ 一个大按钮"开始安装"；下面是**两份文件**的准备清单（原来三份，virtio 那份删掉——现在是内置的） |
+| 3 | 设置页 | 保留改动：内存默认 6 GB（4–10）、CPU 4、分辨率跟随设备；新增"驱动"分组（显示"已内置：显示 2D / 网卡 / 证书"，不可选）；macOS 专属项隐藏 |
+| 4 | 会话页 | 保留改动：触屏 = 绝对定位鼠标、底部虚拟键盘、右上角阶段；阶段 2 常驻操作卡片 |
 
 ---
 
-## 2. 四阶段状态机
+## 3. 四阶段状态机
 
-### 阶段 1 — 准备（不启动任何 VM）
+### 阶段 1 — 准备（不启动 VM）
 
-界面：页 2。程序**不启动虚拟机**，只做文件收集与校验。
-
-要用户提供三份文件：
-
-| # | 文件 | 用途 | 校验（程序做） |
+| # | 文件 | 用途 | 校验 |
 |---|---|---|---|
-| 1 | **Windows 11 ARM64 ESD**（`install.esd`，或从 ISO 里取出） | WinNTSetup 的安装源 | 头部 `MSCM`/`MSCW` 魔术字；`install.esd` 里应含 `Windows 11 ARM64` 映像（用 `wimlib`/自研只读解析取 image 列表亦可，最低限度只校验魔术字与大小） |
-| 2 | **Windows PE（ARM64）** | 阶段 2 的启动环境 | 里面有 `EFI/BOOT/BOOTAA64.EFI`；是 **UEFI 可启动的 FAT32 镜像**（见 §4） |
-| 3 | **virtio-win ISO（ARM64）** | 阶段 4 装驱动（NetKVM，将来 viosgpu） | ISO 里存在 `NetKVM/arm64/*.inf` |
+| 1 | **Windows 11 ARM64 ESD** | WinNTSetup 的安装源 | `MSCM`/`MSCW` 魔术字 + 大小 |
+| 2 | **WinPE（ARM64，FAT32 镜像）** | 阶段 2 的启动环境 | 有 `EFI/BOOT/BOOTAA64.EFI` |
 
-交互：每份文件一行，"选择文件 / 从链接下载（可选）/ 更换"，校验通过打勾。三份齐了，"开始安装"才可点。
+驱动这一项**已经不是用户的事**：App 内置一张几百 KB 的 FAT32 小盘（见 §4）。
 
-失败：任何一份不合格 → 只红那一行，不阻断其他两份的收集。
+### 阶段 2 — WinPE 装系统（用户主导）
 
-### 阶段 2 — 用 WinPE 装系统（用户主导，程序只看）
+机器：6 GB 内存、32 GB 稀疏盘。挂三块盘：
 
-程序做的事只有四件：
+| 槽 | 内容 | 属性 |
+|---|---|---|
+| NVMe0 | 系统盘（32 GB 稀疏） | RW |
+| NVMe1 | WinPE 盘 | RO，**启动源** |
+| NVMe2 | ESD 盘 | RO |
 
-1. 按页 3 的内存（默认 6 GB）与页 2 的空间（默认 32 GB，稀疏）建机器；
-2. 挂三块盘：**系统盘（RW）** + **PE 盘（RO，启动源）** + **ESD 盘（RO）**；
-3. 从 PE 盘启动，把画面/触屏/键盘直通给用户；
-4. 底部常驻操作卡片，除此之外**不自动做任何事**。
+外加一张 **内置驱动盘**（只读小盘，随程序走）——里面是 `viogpudo\w11\ARM64`、`NetKVM\w11\ARM64` 和 `cert\Virtio_Win_Red_Hat_CA.cer`。
+
+程序只做四件事：建机器、挂盘、从 PE 盘启动、把画面/触屏/键盘直通。**不做任何自动化**。
 
 用户按卡片操作：
 
-1. 打开 **DiskGenius**：把 32 GB 盘转 GPT，建 `ESP 300 MB` + `MSR` + 主分区（或直接快速分区）。
-2. 打开 **WinNTSetup**：
-   - "安装源"选 ESD 盘里的 `install.esd`（选 Windows 11 ARM64 那个索引）；
-   - "引导驱动器"选 ESP；
-   - "安装驱动器"选主分区；
-   - **"无人值守"选我们提供的 `unattend.xml`**（随 PE 盘一起放，或单独一张小 tools 盘）。
-3. 点安装 → 等进度走完 → 卡片提示"关机"。
-4. 关机（或点卡片的"我装好了，进入第一次开机"）。
-
-为什么走 WinNTSetup 而不是 Setup：WinNTSetup 能直接吃 `unattend.xml`，把 OOBE、TPM 检查、账户、驱动安装全部前置配置好，于是**阶段 3 不需要触屏驱动**，自己跑完就行——这是你这条方案的核心理由，成立。
+1. **DiskGenius**：32 GB 盘转 GPT，建 ESP 300 MB + MSR + 主分区。
+2. **WinNTSetup**：安装源 = ESD 盘里的 `install.esd`（选 Win11 ARM64 索引）；引导驱动器 = ESP；安装驱动器 = 主分区；**无人值守 = 我们提供的 `unattend.xml`**。
+3. 安装完成 → 关机。
 
 ### 阶段 3 — 第一次开机（挂机）
 
-程序：卸载 PE 盘与 ESD 盘，只留系统盘启动；进程只负责"跑着 + 显示 + 一个按钮"。
+卸载 PE/ESD/驱动盘，只留系统盘启动。`unattend.xml` 接管 OOBE：
+跳过联网、建本地账户、语言/区域/时区、`LabConfig` 绕过 TPM/SecureBoot/RAM 检查。
 
-guest：`unattend.xml` 接管全部 OOBE（跳过联网、建本地账户、语言/区域/时区、绕过 TPM/SecureBoot/RAM 检查）。
+用户只需等到桌面，点"下一步"。
 
-用户：什么都不用做，看它自己走到桌面。底部只有一个按钮："已进入桌面，下一步"。
+### 阶段 4 — 驱动收尾（全自动，**不再需要 virtio ISO**）
 
-### 阶段 4 — 驱动收尾（自动）
+重建 VM，介质 = 系统盘 + **内置驱动盘**（含自动脚本）。启动后自动执行：
 
-程序：**重建 VM**（不是热插拔），介质换成 **系统盘 + virtio-win ISO（RO）**；启动后自动执行驱动安装，然后自动重启一次。
-
-自动执行的载体（二选一，见 §8 决策 4）：
-- 阶段 3 的 `unattend.xml` 里 `FirstLogonCommands` 已经排好了"下次开机去 `D:\` 跑 pnputil"；
-- 或阶段 4 挂一张我们生成的**自动执行盘**（FAT32，内含 `install-drivers.cmd` + `unattend` 片段）。
-
-实际命令（WinPE/Windows 都带 `pnputil`）：
 ```
-pnputil /add-driver D:\NetKVM\arm64\*.inf /install
-pnputil /add-driver D:\vioscsi\arm64\*.inf /install     :: 将来若换 vioscsi
-pnputil /add-driver D:\viosgpu\arm64\*.inf /install     :: 要等 virtio-gpu 实现后才用得上
+certutil -addstore    Root            D:\cert\Virtio_Win_Red_Hat_CA.cer
+certutil -addstore -f TrustedPublisher D:\cert\Virtio_Win_Red_Hat_CA.cer
+pnputil /add-driver D:\NetKVM\w11\ARM64\netkvm.inf /install
+pnputil /add-driver D:\viogpudo\w11\ARM64\viogpudo.inf /install
 ```
-装完自动重启 → **阶段完成**，回到首页，条目变成"可用"，用户手动 **Start**。
+
+自动重启一次 → 完成。条目变"可用"，用户手动 Start。
+
+> 证书这两步是必须的：virtio-win 的驱动是 Red Hat **attestation 签名**，不是 WHQL；
+> 不导入 `Virtio_Win_Red_Hat_CA.cer` 到 Root + TrustedPublisher，`pnputil` 会拒绝加载。
 
 ---
 
-## 3. 各阶段设备表
+## 4. 内置驱动盘（App 自带的那个）
 
-| 阶段 | NVMe0（系统盘） | NVMe1 | NVMe2 | 启动源 | 自动化 |
-|---|---|---|---|---|---|
-| 2 | RW 32 GB 稀疏 | PE 盘 RO | ESD 盘 RO | NVMe1 | 无（用户操作） |
-| 3 | RW | — | — | NVMe0 | unattend |
-| 4 | RW | virtio ISO RO | — | NVMe0 | FirstLogonCommands / 自动盘 |
+| 内容 | 来源 | 大小 | 说明 |
+|---|---|---|---|
+| `NetKVM\w11\ARM64\*.inf/.sys/.cat` | virtio-win | 几十 KB | 网卡，装完就能上网 |
+| `viogpudo\w11\ARM64\viogpudo.inf/.sys` | virtio-win | 约 148 KB | 显示，**2D-only DOD** |
+| `cert\Virtio_Win_Red_Hat_CA.cer` | virtio-win | KB 级 | 驱动签名 CA |
+| `unattend.xml`、`install-drivers.cmd` | 我们生成 | KB 级 | 自动化 |
 
-内存全程 6 GB（页 3 可调）。分辨率跟随设备，ramfb 由 EDK2 GOP 配置。
+形态：一个 FAT32 小镜像（生成一次打进 App，几百 KB），挂成只读 NVMe。**不进 4 GB 单文件限制的问题**，因为最大文件才 148 KB。
 
-> 现在代码只支持 **2 个盘位**（`disk0` 读写 / `disk1` 只读）：阶段 2 要 **3 个**，这是第一个要扩的地方（`HvWinVmConfig` + `winvirt` + `pcie` 槽位，槽位够，`HV_PCI_SLOTS 32`）。
+许可证：virtio-win 驱动是 Red Hat 发布的开源驱动（BSD/GPL 系），可再分发，随附 LICENSE 与来源说明即可。
 
 ---
 
-## 4. 介质格式：三个硬约束（这一节决定成败）
+## 5. 介质格式（三个硬约束，仍然有效）
 
-我们**没有 CD-ROM / AHCI**，只有 NVMe（见 §6），NVMe 后面挂的是**原始字节流**，不是"光盘"。所以：
+我们只有 NVMe（没有 AHCI/ATAPI CD），块设备后面是**原始字节流**，不是光盘。
 
-### 4.1 PE 盘：不要用 ISO，用 UEFI 可启动的 FAT32 镜像
+### 5.1 PE 盘：用 UEFI 可启动的 FAT32 镜像（不要 ISO）
 
-- ISO 要靠 El Torito 从"光盘"启动，而这条链路（EDK2 ArmVirtQemu + 我们的 NVMe）**没验证过**；
-- FAT32 镜像（`.img`，扁平的）挂到 NVMe 后，BDS 直接把它当普通可启动盘，零风险。
-- 制作方式：用户自己用 Rufus 做"WinPE ISO → 写进 VHD/IMG"，或我们以后做工具帮转。
+ISO 要靠 El Torito 从"光盘"启动，这条链路（EDK2 ArmVirtQemu + 我们的 NVMe）没验证过；
+FAT32 扁平镜像挂到 NVMe 后，BDS 直接当可启动盘，零风险。
 
-### 4.2 ESD 盘：三条路，按代价排
+### 5.2 ESD 盘：三条路
 
 | 方案 | 做法 | 代价 | 风险 |
 |---|---|---|---|
-| **A** | 用户把 `install.esd` 打成 **UDF ISO**，我们当只读 NVMe 挂 | 0 行代码 | **未验证**：Windows 会不会把裸块设备上的 ISO 认成卷。大概率不行（Windows 的 ISO 挂载是按文件走的） |
-| **B** | 主机侧解析用户的 ISO（ISO9660/UDF），**重新合成一个 exFAT 盘**，里面只放 `install.esd` | ~600 行（ISO/UDF 只读 + exFAT 写） | 低。guest 100% 可读 |
-| **C** | 用户直接给一个 **exFAT 镜像**（`.img`），里面就一个 `install.esd` | ~0 行代码 | 低。但要用户会用 diskpart/挂 VHD 造镜像 |
-| **D** | 放弃 ESD，直接用完整 Win11 ARM64 ISO 走 Setup | 0 行代码 | 中：Setup 交互多，且 OOBE 自动化没 WinNTSetup 顺手 |
+| A | 用户把 `install.esd` 打成 UDF ISO，我们当只读 NVMe 挂 | 0 | 未验证，Windows 多半不把裸块设备上的 ISO 认成卷 |
+| **B** | 主机侧解析 ISO（ISO9660/UDF），重合成 **exFAT 盘**，里面只放 `install.esd` | ~600 行 | 低 |
+| **C** | 用户直接给 **exFAT 镜像**（里面一个 `install.esd`） | ~0 | 低，用户多一步 |
 
-> 补充：`install.esd` 通常 **4–5 GB**，FAT32 单文件上限 4 GB 放不下 → 用 **exFAT**（WinPE 自带 exFAT 驱动）或 UDF。
+`install.esd` 通常 4–5 GB，**FAT32 单文件上限 4 GB** 放不下 → 必须 exFAT 或 UDF。
 
-### 4.3 virtio ISO：和 4.2 同一个问题
+### 5.3 驱动盘：不用讨论
 
-阶段 4 要 `pnputil` 读里面 `.inf`，所以同样不能是"裸块设备上的 ISO"。最省事：**方案 C** —— 让用户给一个 exFAT 镜像，里面放 `NetKVM/arm64` 那几个文件（几百 KB），或者我们直接从 ISO 里抽出这几个文件合成小 FAT32 盘（**这条最划算**：virtio 驱动总共几百 KB，完全放得进 FAT32，不受 4 GB 限制）。
-
-**结论建议**：virtio 驱动盘由**我们生成**（从 ISO 抽 4 个文件合成 FAT32 小盘，几十行代码）；PE 要用户给 FAT32 镜像；ESD 用方案 C 或 B。
+我们自己做，FAT32，几百 KB（§4）。
 
 ---
 
-## 5. `unattend.xml` 要写什么
+## 6. `unattend.xml` 要点
 
-| 段 | 内容 | 作用 |
-|---|---|---|
-| `windowsPE` → `Microsoft-Windows-Setup` → `RunSynchronous` | 写 `HKLM\SYSTEM\Setup\LabConfig`：`BypassTPMCheck` / `BypassSecureBootCheck` / `BypassRAMCheck` = 1 | 绕过 Win11 硬门槛（本机无 TPM） |
-| `windowsPE` → `UserData` | `AcceptEula`、产品密钥（可留空/通用密钥） | 免交互 |
-| `specialize` | 计算机名、时区 `China Standard Time`、语言 zh-CN | 免 OOBE 询问 |
-| `oobeSystem` | 建本地账户、`BypassNRO`（跳过联网）、跳过隐私页 | 阶段 3 无人值守 |
-| `oobeSystem` → `FirstLogonCommands` | 下次开机挂 virtio 盘后执行 `pnputil` 的脚本 | 阶段 4 自动装驱动 |
-
-注意：本机 **无 TPM 也无 Secure Boot**，所以 `BypassTPMCheck` 是必需的，不是可选。
-
----
-
-## 6. 与现有代码的映射
-
-**已经有的（不用做）**
-
-| 能力 | 位置 |
+| 段 | 内容 |
 |---|---|
-| 双 NVMe（一个 RW、一个 RO） | `winvirt.c`、`host/winvm.c`（`disk0`/`disk1`） |
-| 绝对定位平板 + HID 键盘（触屏当鼠标、虚拟键盘） | `hv_winvm_tablet()`、`hv_winvm_key_hid()`、`devices/xhci.c` |
-| ramfb 画面 | `devices/fb_display.c`（`etc/ramfb`，EDK2 GOP 配） |
-| 稀疏磁盘 | `host/hvsparse.c`、`Installer` 里 `truncate` 的用法 |
-| 不占 Jetsam footprint 的客户机 RAM | `hv_alloc_no_footprint()` |
-| 断电/停止、截图、状态 | `hv_winvm_stop()`、`hv_winvm_save_png()`、`hv_winvm_engine_stats()` |
-
-**缺的（要做的，按依赖排）**
-
-| # | 缺什么 | 规模 | 说明 |
-|---|---|---|---|
-| 1 | **`devices/fb_metal.m`** | 中 | 呈现器根本不存在，`winvm` 现在链接不过。没有它什么都看不见 |
-| 2 | **第三个只读介质槽** | 小 | `HvWinVmConfig` 加 `disk2`/`media[]`，`hv_winvirt_create` 加一个 slot |
-| 3 | 启动源选择 | 小 | 阶段 2 要从 NVMe1 启动。BDS 走 NVRAM：直接预置 `Boot####`/`BootOrder`，或最土的办法——**PE 盘占 NVMe0 槽位**（但我们又要求系统盘在 NVMe0…）。建议写 `BootNext` 到 vars flash |
-| 4 | Swift 侧阶段机 + 文件校验 | 中 | 页 2/3/4 改造、三份文件校验、unattend 生成 |
-| 5 | virtio 驱动小盘生成 | 小 | 从 ISO 抽 `.inf/.sys/.cat` 合成 FAT32 镜像（~80 行） |
-| 6 | ESD 盘（按 §4.2 选型） | 小–中 | C 几乎为 0，B 约 600 行 |
-
-**没有热插拔**：所有设备在 `hv_winvirt_create` 时一次性建好（`pcie.c` 有 `hv_pcie_attach`，但没有运行时插拔逻辑）。所以阶段 3→4 的"卸载 ISO、换 virtio 盘"**靠重建 VM**——正好你设计里就是"自动重启"，两者天然对齐，不用做热插拔。
+| `windowsPE` → `RunSynchronous` | 写 `HKLM\SYSTEM\Setup\LabConfig`：`BypassTPMCheck` / `BypassSecureBootCheck` / `BypassRAMCheck` = 1（本机无 TPM，这是**必需**） |
+| `specialize` | 计算机名、时区 `China Standard Time`、zh-CN |
+| `oobeSystem` | 本地账户、跳过联网（`BypassNRO`）、跳过隐私页 |
+| `oobeSystem` → `FirstLogonCommands` | 留一个"下次开机装驱动"的钩子（阶段 4 用） |
 
 ---
 
-## 7. 失败与回滚
+## 7. 显卡：2D 能到哪，3D 为什么不行
+
+### 7.1 路线对比
+
+| 路线 | guest 侧驱动 | 我们这边要做 | 结果 |
+|---|---|---|---|
+| ramfb（现状） | Windows 自带 BasicDisplay（继承 UEFI GOP 帧缓冲） | `fb_metal.m` 呈现器（**缺**） | 能装、能看、能办公；分辨率固定、无加速 |
+| **virtio-gpu 2D + viogpudo** | `viogpudo\w11\ARM64`（virtio-win） | 写 `devices/virtio_gpu.c`（2D 命令流）+ 呈现器 | 分辨率可换、缩放更好、仍是 2D |
+| virtio-gpu 3D（virgl） | Windows ARM64 **无可用驱动** | virglrenderer 移植 + 3D 驱动 | **当前不可达** |
+
+### 7.2 virtio-gpu 2D 要写什么（`devices/virtio_gpu.c` 工作量估计）
+
+- virtio 队列 + 控制队列：`GET_DISPLAY_INFO`、`RESOURCE_CREATE_2D`、`RESOURCE_ATTACH_BACKING`、`SET_SCANOUT`、`TRANSFER_TO_HOST_2D`、`RESOURCE_FLUSH`
+- 显存就是 guest RAM 里的资源页；flush 时做一次 blit 到呈现器
+- 规模：**比 `pvg_metal.m`（2883 行 Metal）小一个数量级**，大约 300–600 行 C
+- 前置：`fb_metal.m` 呈现器要先有（否则导不出来）
+
+### 7.3 3D：为什么现在没有
+
+- Windows 的 3D 虚拟显卡需要 **guest 侧 WDDM 3D 驱动**（virgl/venus 或 DirectX 直通）。
+- 目前唯一的 Windows 3D 路线是社区项目 **Triton**（virgl/DirectX in QEMU/KVM）：
+  **它在 ARM64 Windows 上崩溃**，且多年未上游合并。
+- UTM 对 Windows 访客**不提供** DirectX/OpenGL 3D（GPU 加速只给 Linux 访客，官方还默认关掉）。
+- 结论：**3D 不是"难"，是"没有驱动"**。要等有人把 virgl 的 WDDM 驱动编出 ARM64 版；在此之前，
+  唯一能做的是把 2D 做到"顺滑、可缩放、不掉帧"，让 Windows 用起来像台机器。
+
+---
+
+## 8. 与现有代码的映射
+
+**已有**：双 NVMe 槽、xHCI 键盘 + 绝对平板、ramfb、稀疏镜像、Jetsam 豁免内存、截图/停止/统计钩子。
+
+**缺**（按依赖排）：
+
+| # | 缺什么 | 规模 |
+|---|---|---|
+| 1 | `devices/fb_metal.m` 呈现器 | 中（现在 `winvm` 链接不过） |
+| 2 | 第三个只读槽（阶段 2 要 3 块盘） | 小 |
+| 3 | 启动源选择（阶段 2 从 NVMe1 启动，写 `BootNext` 到 vars flash） | 小 |
+| 4 | `devices/virtio_gpu.c`（2D） | 中（300–600 行） |
+| 5 | Swift 侧四阶段状态机 + 两份文件校验 + `unattend.xml` 生成 | 中 |
+| 6 | 内置驱动盘生成（从 virtio-win ISO 抽 5 个文件 → FAT32） | 小 |
+| 7 | ESD 盘（按 §5.2 选型） | 0–600 行 |
+
+**没有热插拔**：设备在 `hv_winvirt_create` 时一次建好。阶段 3→4 换介质**靠重建 VM**——正好对应"自动重启"。
+
+---
+
+## 9. 失败与回滚
 
 | 阶段 | 失败 | 处理 |
 |---|---|---|
-| 1 | 文件不合格 | 只标红那一行，可换 |
-| 2 | DiskGenius/WinNTSetup 出错 | 不动镜像，可重来；"回到准备"按钮 |
-| 2 | 装到一半用户走了/App 被杀 | 盘是稀疏镜像，下次进来接着用；不自动删 |
-| 3 | OOBE 卡住（unattend 有误） | 提供"回阶段 2 重装"，并保留上一次的 `unattend.xml` 便于对比 |
-| 3 | 黑屏/无画面 | 判定为 ramfb 或呈现器问题，落日志 + 保留串口最后一行 |
-| 4 | 驱动没装上 | 不影响开机；可手动再挂 virtio 盘，条目仍算"可用" |
+| 1 | 文件不合格 | 只标红那一行 |
+| 2 | DiskGenius/WinNTSetup 出错 | 不动镜像，可重来 |
+| 2 | App 被杀 | 稀疏盘留着，下次接着用 |
+| 3 | OOBE 卡住 | "回阶段 2 重装"，保留 `unattend.xml` 便于对比 |
+| 3 | 黑屏 | 判为 ramfb/呈现器问题，落日志 + 串口最后一行 |
+| 4 | 驱动没装上 | 不影响开机；可再挂驱动盘重跑，条目仍算"可用" |
 
 ---
 
-## 8. 需要你拍板的四件事
+## 10. 要你拍板的（已简化）
 
-1. **ESD 怎么进 guest**：A（用户打 UDF ISO，风险未验）/ **B（我们解析 ISO 再合成 exFAT，稳但~600 行）** / C（用户给 exFAT 镜像，最省）/ D（放弃 ESD 走 Setup）。
-   我的建议：**C 起步，留 B 作为"以后帮用户自动做"的升级**。
-2. **PE 给 ISO 还是 FAT32 镜像**：我强烈建议 **FAT32 镜像**（`.img`），理由见 §4.1。
-3. **32 GB / 6 GB 是不是定值**：32 GB 是默认还是最小？6 GB 内存在 8 GB 机型上会被 iOS 压得很紧（有 `hv_alloc_no_footprint` 兜底，但 Jetsam 仍可能杀），要不要按机型上限自动降？
-4. **驱动自动安装的载体**：`unattend` 的 `FirstLogonCommands`（少一张盘，但要求阶段 3 就能看到 D 盘）还是**独立的自动执行盘**（阶段 4 挂进去，逻辑更清楚）？
-   我的建议：**独立自动执行盘**，阶段 4 的边界最干净——挂盘 = 开始干活，拔盘 = 结束。
+1. **ESD 怎么进 guest**：B（我们解析 ISO 再合成 exFAT，稳）还是 C（用户给 exFAT 镜像，省）？
+   建议 **C 起步、B 作为后续自动化**。
+2. **PE 给 FAT32 镜像**（我的强建议）——你确认就行。
+3. **32 GB / 6 GB 是默认还是硬性**？6 GB 在 8 GB 机型上要防 Jetsam，要不要按机型自动降？
+4. **阶段 4 的自动装驱动载体**：`unattend` 的 `FirstLogonCommands`，还是独立自动执行盘？建议后者。
+5. **要不要现在就做 virtio-gpu 2D**？我的建议：**先做 `fb_metal.m` + ramfb 把画面跑顺，virtio-gpu 放进 M4**。
+   因为 2D 的收益是"分辨率可换"，而代价是一个新设备 + 新驱动加载链；ramfb 已经能装能看。
 
 ---
 
-## 9. 落地顺序（建议）
+## 11. 落地顺序
 
-1. `devices/fb_metal.m`（不解决就什么都看不见）
+1. `devices/fb_metal.m`（不解决什么都看不见）
 2. 三介质槽 + 启动源选择（阶段 2 能起来）
-3. Swift 侧四阶段状态机 + 页 2/3/4 改造（能走完全流程）
-4. virtio 驱动小盘生成（阶段 4 自动化）
-5. ESD 盘（按决策 1）→ 之后才是真机冒烟
+3. Swift 四阶段状态机 + 页 2/3/4 改造 + 内置驱动盘
+4. `unattend.xml` 与自动装驱动脚本
+5. ESD 盘（按决策 1）→ 真机冒烟
+6. （M4）`devices/virtio_gpu.c` + `viogpudo` 自动装 → 2D 升级
