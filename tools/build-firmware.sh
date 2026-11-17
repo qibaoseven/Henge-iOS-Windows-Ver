@@ -195,22 +195,25 @@ EOF
       # BaseTools' C build does not need those packages, so tolerate the refusal.
       [ -f pip-requirements.txt ] && python3 -m pip install -q --break-system-packages -r pip-requirements.txt >/dev/null 2>&1 || true
       # BaseTools is host tooling built by the host compiler, and its makefiles
-      # pass -Werror. Xcode 16+'s clang now ships a UINT8_MAX in <stdint.h> while
-      # edk2-stable202408's Common/Decompress.c #defines it again, which stopped
-      # the CI build at the first file:
-      #   Decompress.c:18:9: error: 'UINT8_MAX' macro redefined
-      # EXTRA_OPTFLAGS lands after -Werror, so this demotes that warning class
-      # instead of patching a third-party tree.
+      # pass -Werror. Modern compilers are stricter than the ones this tag was
+      # tested with, and each one stops the build on a single old construct:
+      #   Decompress.c:18:9: error: 'UINT8_MAX' macro redefined        (clang 16+)
+      #   EfiRom.c:78:17: error: assignment discards 'const' qualifier [-Werror=discarded-qualifiers]
+      #   GenFv.c / VfrCompile: note: unrecognized option '-Wno-macro-redefined'
+      # BaseTools is a host tool, not the firmware we ship, so instead of chasing
+      # warning names one at a time, demote the whole -Werror. EXTRA_OPTFLAGS
+      # lands after -Wall -Werror in header.makefile's CFLAGS (and in the C++
+      # rules, which also append BUILD_OPTFLAGS), which is what -Wno-error needs.
       #
-      # Pccts (antlr 1.33 and dlg, 1989 code) calls through unprototyped
-      # function pointers, and GCC 13/14 read `int (*)()` as taking no arguments:
+      # Pccts (antlr 1.33 and dlg, 1989 code) also calls through unprototyped
+      # function pointers, which GCC 13/14 read as taking no arguments:
       #   main.c:163:42: error: too many arguments to function 'p->process'; expected 0, have 2
       # Those makefiles build CFLAGS out of COPT, and COPT appears nowhere else in
       # BaseTools -- dlg compiles with `gcc`, antlr with `cc`, so a shim on PATH
       # would have caught only half of it. GNU make passes command-line variables
       # down to sub-makes, which overrides their `COPT=-O`: that pins -std=gnu89
-      # for the Pccts subtree alone and leaves BaseTools' `gcc -Werror` files alone.
-      make -C BaseTools -j"$JOBS" EXTRA_OPTFLAGS="-Wno-macro-redefined" COPT="-O -std=gnu89"
+      # for the Pccts subtree alone.
+      make -C BaseTools -j"$JOBS" EXTRA_OPTFLAGS="-Wno-macro-redefined -Wno-error" COPT="-O -std=gnu89"
       # `build` reads Conf/{target,tools_def,build_rule}.txt. edksetup.sh's
       # BuildEnv creates them from BaseTools/Conf/*.template on first run, but
       # edksetup has to be *sourced*, which a build script cannot do for the
