@@ -1,0 +1,71 @@
+name: import-bundle
+
+# The sandbox has no git credential, but GitHub Actions does. So the sandbox
+# hands over a git bundle (a single file, binaries included) and the runner
+# pushes it into this repository with its own token -- no key, no PAT, nothing
+# for the user to copy.
+#
+# Triggered once by pushing this file itself, and re-runnable by hand with a
+# different bundle_url when the sandbox has newer work.
+on:
+  push:
+    paths:
+      - ".github/workflows/import-bundle.yml"
+  workflow_dispatch:
+    inputs:
+      bundle_url:
+        description: "git bundle URL (https, downloadable by the runner)"
+        required: true
+        default: "https://aka.doubaocdn.com/s/nNeUWkfY01"
+      force:
+        description: "true = replace main with the bundle's main"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch the bundle
+        env:
+          URL: ${{ inputs.bundle_url || 'https://aka.doubaocdn.com/s/nNeUWkfY01' }}
+        run: |
+          set -eux
+          curl -fL --retry 3 --retry-delay 2 -o /tmp/repo.bundle "$URL"
+          ls -l /tmp/repo.bundle
+          git bundle verify /tmp/repo.bundle
+
+      - name: Push it as main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force || 'true' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eux
+          git clone /tmp/repo.bundle work
+          cd work
+          git log --oneline -3
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if [ "$FORCE" = "true" ]; then
+            git push --force origin main
+          else
+            git fetch origin main
+            git rebase origin/main || git rebase --abort
+            git push origin main
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### 已导入"
+            echo ""
+            echo "- bundle: `${{ inputs.bundle_url || 'https://aka.doubaocdn.com/s/nNeUWkfY01' }}`"
+            echo "- 方式: $([ "${{ inputs.force || 'true' }}" = "true" ] && echo 强制覆盖 main || echo rebase 后推送)"
+            echo ""
+            echo "这次推送由 GITHUB_TOKEN 完成，不会再次触发其他工作流（GitHub 的防递归规则）；"
+            echo "需要重建固件的话，再推一次任意提交或用 firmware 工作流的手动入口。"
+          } >> "$GITHUB_STEP_SUMMARY"
