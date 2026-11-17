@@ -224,8 +224,17 @@ EOF
           [ -f "Conf/$f.txt" ] || cp "BaseTools/Conf/$f.template" "Conf/$f.txt"
       done
       export PATH="$EDK2/BaseTools/BinWrappers/PosixLike:$PATH"
+      # tools_def.template spells every AARCH64 tool as ENV(GCC5_AARCH64_PREFIX)gcc
+      # -- it reads an *environment variable*. `build -D GCC5_AARCH64_PREFIX=...`
+      # only defines a DSC/FDF macro, so the command line stayed bare "gcc" and
+      # the host compiler died on -mlittle-endian / -mstrict-align:
+      #   error F002: Failed to build module .../BaseStackCheckLib.inf [AARCH64, GCC5, RELEASE]
+      # Export it instead; make and the gcc invocations then inherit the prefix.
+      if [ -n "$PREFIX" ]; then
+          export GCC5_AARCH64_PREFIX="$PREFIX"
+      fi
       build -a AARCH64 -t "$TOOLCHAIN" -b RELEASE -p ArmVirtPkg/ArmVirtQemu.dsc \
-            -D "GCC5_AARCH64_PREFIX=$PREFIX" -n "$JOBS"
+            -n "$JOBS"
     )
     Build="$EDK2/Build/ArmVirtQemu-AARCH64/RELEASE_${TOOLCHAIN}"
     if [ ! -f "$Build/FV/QEMU_EFI.fd" ]; then
