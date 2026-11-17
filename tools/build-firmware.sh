@@ -201,6 +201,18 @@ EOF
       #   Decompress.c:18:9: error: 'UINT8_MAX' macro redefined
       # EXTRA_OPTFLAGS lands after -Werror, so this demotes that warning class
       # instead of patching a third-party tree.
+      #
+      # Pccts (antlr 1.33 and dlg, 1989 code) calls through unprototyped
+      # function pointers, and GCC 13/14 read `int (*)()` as taking no arguments:
+      #   main.c:163:42: error: too many arguments to function 'p->process'; expected 0, have 2
+      # Those makefiles invoke plain `cc` without -std and ignore
+      # EXTRA_OPTFLAGS, so a shim on PATH pins gnu89 for that subtree alone;
+      # BaseTools' own files are compiled by `gcc` with their -Werror untouched.
+      _real_cc=$(command -v cc || echo /usr/bin/cc)
+      mkdir -p .ci-bin
+      printf '#!/bin/sh\nexec %s -std=gnu89 "$@"\n' "$_real_cc" > .ci-bin/cc
+      chmod +x .ci-bin/cc
+      export PATH="$PWD/.ci-bin:$PATH"
       make -C BaseTools -j"$JOBS" EXTRA_OPTFLAGS="-Wno-macro-redefined"
       # `build` reads Conf/{target,tools_def,build_rule}.txt. edksetup.sh's
       # BuildEnv creates them from BaseTools/Conf/*.template on first run, but
