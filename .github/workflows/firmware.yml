@@ -1,30 +1,27 @@
+# Builds the two pflash volumes the board boots from and publishes them as the
+# `firmware-latest` release: code.fd (UEFI, read-only) and vars.fd (NVRAM, writable).
+#
+# Both are ArmVirtQemu AARCH64 builds -- the machine devices/winvirt.c emulates is
+# QEMU's `virt` with a Windows-shaped device set -- so a stock ArmVirtQemu build is
+# what the app wants. See tools/build-firmware.sh for the 64 MB bank rule and for
+# the host-toolchain fixes (BaseTools -Werror, Pccts under GCC 13/14).
+#
+# Runs on Linux, not macOS: edk2 has no XCODE5_AARCH64 target at all (XCODE5
+# produces Mach-O for IA32/X64), and an AARCH64 UEFI build has to emit ELF that
+# GenFw then converts to PE/COFF. apt's gcc-aarch64-linux-gnu does that in one
+# install; on a Mac it takes a keg-installed cross gcc.
 name: firmware
 
-# Builds the two 64 MB pflash banks the Windows board needs (code.fd / vars.fd)
-# and publishes them as a release asset, so the iPad can just pull them:
-#
-#   gh release download firmware-latest -p '*.fd' -D out/firmware
-#
-# Why Linux and not macOS: ArmVirtQemu is AARCH64-only, and edk2's
-# tools_def.template has no XCODE5_AARCH64 at all -- XCODE5 emits Mach-O and
-# covers IA32/X64, so `-t XCODE5 -a AARCH64` cannot work on any Mac. What this
-# target needs is a GNU cross compiler that emits ELF, which GenFw then turns
-# into PE/COFF: apt's gcc-aarch64-linux-gnu delivers that in one install, on an
-# x86 runner that is cheaper and faster than a macOS one.
-#
-# No signing key and no secret to configure: the firmware is not code-signed
-# (Secure Boot off), and the release is published with the token every workflow
-# already has -- it only needs `permissions: contents: write` below.
-
-# Pushing is what triggers it: no manual dispatch needed, and no path filter --
-# any push to the default branches rebuilds, so the asset is never stale.
 on:
   push:
     branches: [main, master]
-  workflow_dispatch: # kept as an escape hatch, not the normal way in
+    paths:
+      - 'tools/build-firmware.sh'
+      - '.github/workflows/firmware.yml'
+  workflow_dispatch:
 
 permissions:
-  contents: write # create/update the firmware-latest release
+  contents: write
 
 concurrency:
   group: firmware-${{ github.ref }}
@@ -41,7 +38,11 @@ jobs:
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu acpica-tools
+          # uuid-dev matters: BaseTools' GenFw is linked with `-luuid` and the
+          # runner image ships the runtime but not the .so to link against, so
+          # the host tools stop at
+          #   ld: cannot find -luuid
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu acpica-tools uuid-dev
           aarch64-linux-gnu-gcc --version | head -1
           # ArmVirtQemu compiles ASL, so iasl has to be there (acpica-tools).
           command -v iasl
@@ -59,64 +60,34 @@ jobs:
         run: |
           chmod +x tools/build-firmware.sh
           ./tools/build-firmware.sh --source
-        env:
-          EDK2: ${{ github.workspace }}/third_party/edk2
 
       - name: Verify the banks
         run: |
-          ls -l out/firmware
+          set -eux
+          for f in out/firmware/code.fd out/firmware/vars.fd; do
+            test -f "$f"
+            size=$(stat -c %s "$f")
+            test "$size" -eq $((64 * 1024 * 1024))
+          done
+          # A UEFI firmware volume starts with a _FVH signature a few bytes in;
+          # without it the app would boot into nothing.
           python3 - <<'PY'
-          import os, sys
-          sys.path.insert(0, '.')
-          bank = 64 << 20
-          for name in ('code.fd', 'vars.fd'):
-              p = os.path.join('out', 'firmware', name)
-              if not os.path.exists(p):
-                  sys.exit(f'missing {p}')
-              size = os.path.getsize(p)
-              if size != bank:
-                  sys.exit(f'{name} is {size} bytes, expected one 64 MB bank')
-          with open('out/firmware/code.fd', 'rb') as f:
-              head = f.read(0x1000)
-          if b'_FVH' not in head:
-              sys.exit('code.fd has no firmware volume header')
-          print('code.fd: FV header present, 64 MB')
-          print('vars.fd: 64 MB')
-          PY
-          sha256sum out/firmware/*.fd | tee out/firmware/SHA256SUMS
+import sys
+with open('out/firmware/code.fd', 'rb') as f:
+    head = f.read(0x100)
+assert b'_FVH' in head, 'code.fd has no firmware volume header'
+print('code.fd: _FVH at offset', head.index(b'_FVH') - 0x28)
+PY
+          ls -l out/firmware
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pflash
-          path: |
-            out/firmware/code.fd
-            out/firmware/vars.fd
-            out/firmware/SHA256SUMS
-          retention-days: 90
-
-      # A fixed tag rather than a new one each run, so "download the latest"
-      # stays one command and does not accumulate 128 MB per build.
       - name: Publish firmware-latest
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -eux
+          # One rolling release, overwritten each run: the app fetches a fixed URL.
           gh release view firmware-latest >/dev/null 2>&1 \
-            || gh release create firmware-latest \
-                 --title "UEFI pflash (ArmVirtQemu AARCH64)" \
-                 --notes "code.fd / vars.fd, two 64 MB pflash banks. Built from edk2 by .github/workflows/firmware.yml."
-          gh release upload firmware-latest \
-            out/firmware/code.fd out/firmware/vars.fd out/firmware/SHA256SUMS --clobber
-
-      - name: How to pull it
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ### 固件已发布
-          在仓库里拉回三个文件：
-
-          \`\`\`
-          gh release download firmware-latest -p '*.fd' -D out/firmware
-          ./tools/stage-app-resources.sh
-          \`\`\`
-
-          不用先创建工作目录，\`-D\` 会建。校验：\`sha256sum -c out/firmware/SHA256SUMS\`。
-          EOF
+            || gh release create firmware-latest --title 'Firmware (ArmVirtQemu AARCH64)' \
+                 --notes 'code.fd + vars.fd, 64 MB pflash banks, built from edk2-stable202408 by firmware.yml.'
+          gh release upload firmware-latest out/firmware/code.fd out/firmware/vars.fd --clobber
+          gh release view firmware-latest --json assets --jq '.assets[] | "\(.name) \(.size)"'
