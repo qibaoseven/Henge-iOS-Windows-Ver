@@ -175,8 +175,17 @@ else
       export WORKSPACE="$EDK2"
       export EDK_TOOLS_PATH="$EDK2/BaseTools"
       export PACKAGES_PATH="$EDK2"
-      [ -f pip-requirements.txt ] && python3 -m pip install -q -r pip-requirements.txt || true
-      make -C BaseTools -j"$JOBS"
+      # pip on macOS' Homebrew python refuses a system-wide install (PEP 668);
+      # BaseTools' C build does not need those packages, so tolerate the refusal.
+      [ -f pip-requirements.txt ] && python3 -m pip install -q --break-system-packages -r pip-requirements.txt >/dev/null 2>&1 || true
+      # BaseTools is host tooling built by the host compiler, and its makefiles
+      # pass -Werror. Xcode 16+'s clang now ships a UINT8_MAX in <stdint.h> while
+      # edk2-stable202408's Common/Decompress.c #defines it again, which stopped
+      # the CI build at the first file:
+      #   Decompress.c:18:9: error: 'UINT8_MAX' macro redefined
+      # EXTRA_OPTFLAGS lands after -Werror, so this demotes that warning class
+      # instead of patching a third-party tree.
+      make -C BaseTools -j"$JOBS" EXTRA_OPTFLAGS="-Wno-macro-redefined"
       export PATH="$EDK2/BaseTools/BinWrappers/PosixLike:$PATH"
       build -a AARCH64 -t "$TOOLCHAIN" -b RELEASE -p ArmVirtPkg/ArmVirtQemu.dsc \
             -D "GCC5_AARCH64_PREFIX=$PREFIX" -n "$JOBS"
