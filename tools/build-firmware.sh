@@ -61,6 +61,46 @@ else:
 PY
 }
 
+# edk2 pins twelve submodules, three of which live under UnitTestFrameworkPkg
+# (cmocka, googletest, subhook). Only edk2's host unit tests use those; ArmVirtQemu
+# never does -- but `git submodule update --init --recursive` gives up on the whole
+# tree when one of them fails, which is what CI saw:
+#
+#   fatal: could not read Username for 'https://github.com': Device not configured
+#   fatal: clone of 'https://github.com/Zeex/subhook.git' ... a second time, aborting
+#
+# Zeex/subhook no longer resolves, and GitHub answers an anonymous clone of a
+# repository it cannot show with a 401, so git asks for a username and has no
+# terminal to ask on. Fetch each submodule on its own instead: a UnitTestFramework
+# one that fails is reported and skipped, anything else is still fatal.
+init_edk2_submodules() {
+    _repo="$1"
+    _optional_failed=""
+    while read -r _path; do
+        case "$_path" in
+            UnitTestFrameworkPkg/*) _optional=1 ;;
+            *) _optional=0 ;;
+        esac
+        printf '  submodule %s\n' "$_path"
+        if GIT_TERMINAL_PROMPT=0 git -C "$_repo" submodule update --init -- "$_path" 2>&1 | sed 's/^/    /'; then
+            continue
+        fi
+        if [ "$_optional" = 1 ]; then
+            echo "    skipped: only edk2's host unit tests use this one, not ArmVirtQemu"
+            _optional_failed="$_optional_failed $_path"
+        else
+            echo "error: could not fetch $_path, and ArmVirtQemu needs it" >&2
+            return 1
+        fi
+    done <<EOF
+$(git config -f "$_repo/.gitmodules" --get-regexp '^submodule\..*\.path$' | cut -d' ' -f2-)
+EOF
+    if [ -n "$_optional_failed" ]; then
+        say "Not fetched (optional):$_optional_failed"
+    fi
+    return 0
+}
+
 if [ "$MODE" = "--package" ]; then
     say "Looking for a distro AArch64 EDK2 build"
     candidate_dirs=(
@@ -107,8 +147,9 @@ else
         # Pin a known-good tag; submodules are pinned by it, so a shallow
         # submodule clone would fail on the exact sha -- take them at depth but
         # let git fetch the pinned commit.
-        git clone --depth 1 --branch edk2-stable202408 https://github.com/tianocore/edk2.git "$EDK2"
-        ( cd "$EDK2" && git submodule update --init --recursive )
+        GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch edk2-stable202408 \
+            https://github.com/tianocore/edk2.git "$EDK2"
+        init_edk2_submodules "$EDK2"
     fi
 
     JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
