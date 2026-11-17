@@ -154,16 +154,32 @@ else
 
     JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
-    # Toolchain: a native AArch64 gcc, or an x86 cross compiler, or clang for XCODE5.
+    # ArmVirtQemu is AARCH64 only, and edk2's tools_def.template has no
+    # XCODE5_AARCH64 at all -- XCODE5 covers IA32/X64 (Mach-O objects), so
+    # `build -a AARCH64 -t XCODE5` cannot work on a Mac, Apple silicon or not.
+    # What that target needs is a GNU/LLVM cross compiler that emits ELF, which
+    # GenFw then turns into PE/COFF: apt's gcc-aarch64-linux-gnu on Linux, a
+    # keg-installed cross gcc on a Mac, plain clang+lld as the last resort.
     TOOLCHAIN=""
     if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
         TOOLCHAIN="GCC5"; PREFIX="aarch64-linux-gnu-"
-    elif [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-        TOOLCHAIN="XCODE5"; PREFIX=""
+    elif command -v aarch64-unknown-linux-gnu-gcc >/dev/null 2>&1; then
+        TOOLCHAIN="GCC5"; PREFIX="aarch64-unknown-linux-gnu-"
+    elif command -v aarch64-elf-gcc >/dev/null 2>&1; then
+        TOOLCHAIN="GCC5"; PREFIX="aarch64-elf-"
     elif command -v clang >/dev/null 2>&1; then
         TOOLCHAIN="CLANGDWARF"; PREFIX=""
     else
-        echo "error: no AArch64 toolchain found (need aarch64-linux-gnu-gcc or clang)" >&2
+        cat >&2 <<'EOF'
+error: no AArch64 cross toolchain found.
+
+  Linux:  sudo apt install gcc-aarch64-linux-gnu   (or dnf install gcc-aarch64-linux-gnu)
+  macOS:  brew tap messense/macos-cross-toolchains && brew install aarch64-unknown-linux-gnu
+          (then put `aarch64-unknown-linux-gnu-gcc` on PATH)
+
+Building AARCH64 UEFI firmware on a Mac without a cross compiler does not work:
+Xcode's toolchain only produces Mach-O, and edk2 has no XCODE5 AARCH64 target.
+EOF
         exit 1
     fi
     say "Toolchain: $TOOLCHAIN"
@@ -186,6 +202,15 @@ else
       # EXTRA_OPTFLAGS lands after -Werror, so this demotes that warning class
       # instead of patching a third-party tree.
       make -C BaseTools -j"$JOBS" EXTRA_OPTFLAGS="-Wno-macro-redefined"
+      # `build` reads Conf/{target,tools_def,build_rule}.txt. edksetup.sh's
+      # BuildEnv creates them from BaseTools/Conf/*.template on first run, but
+      # edksetup has to be *sourced*, which a build script cannot do for the
+      # caller -- so do the same copy here. Without it build.py stops with
+      #   error 000E: File/directory not found in workspace ... Conf/tools_def.txt
+      mkdir -p Conf
+      for f in build_rule tools_def target; do
+          [ -f "Conf/$f.txt" ] || cp "BaseTools/Conf/$f.template" "Conf/$f.txt"
+      done
       export PATH="$EDK2/BaseTools/BinWrappers/PosixLike:$PATH"
       build -a AARCH64 -t "$TOOLCHAIN" -b RELEASE -p ArmVirtPkg/ArmVirtQemu.dsc \
             -D "GCC5_AARCH64_PREFIX=$PREFIX" -n "$JOBS"
