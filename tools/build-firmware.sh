@@ -45,9 +45,15 @@ sanity() {
 import sys
 code, vars_ = sys.argv[1], sys.argv[2]
 with open(code, 'rb') as f:
-    head = f.read(0x1000)
-if b'_FVH' not in head[:0x100]:
-    print('  warning: no FV header near the start of code.fd -- is this really a UEFI build?')
+    # ArmVirtQemu's QEMU_EFI.fd does not start with an FV: offset 0 holds a
+    # 4-byte AArch64 branch stub ("b 0x1000"), and the real FV starts at 0x1000
+    # (so that UEFI never has to cope with an FV at physical address 0). Reading
+    # only the first 4 KB therefore misses the '_FVH' signature at 0x1028.
+    head = f.read(0x2000)
+if b'_FVH' not in head:
+    print('  warning: no FV header in the first 8 KB of code.fd -- is this really a UEFI build?')
+elif b'_FVH' not in head[:0x1000]:
+    print('  code.fd: firmware volume header at 0x1000 (branch stub at offset 0)')
 else:
     print('  code.fd: firmware volume header found')
 with open(vars_, 'rb') as f:
