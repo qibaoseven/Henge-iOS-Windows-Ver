@@ -13,8 +13,14 @@
 
 name: Build Henge IPA
 
-# Manual only (Actions tab > Build Henge IPA > Run workflow): pushes to main don't build an IPA.
+# Pushes to main build an IPA; the same build can still be started by hand from
+# the Actions tab (Build Henge IPA > Run workflow), e.g. to force a firmware refresh.
 on:
+  push:
+    branches: [main]
+    # Failure logs are committed by the build itself; don't rebuild for them.
+    paths-ignore:
+      - "ci-logs/**"
   workflow_dispatch:
     inputs:
       refresh_firmware:
