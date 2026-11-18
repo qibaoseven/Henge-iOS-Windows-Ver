@@ -36,38 +36,20 @@ struct HengeApp: App {
 }
 
 struct RootView: View {
-    enum Tab: Hashable { case macs, install, settings }
-
-    @ObservedObject private var machines = Machines.shared
+    // Windows only: the macOS machines screen belonged to the guest bridge that
+    // went away with the Windows direction. The three Windows pages already have
+    // their own list/install/settings flow, so the app opens straight onto it.
     @ObservedObject private var jit = JITCoordinator.shared
     @Environment(\.scenePhase) private var scenePhase
-    @State private var running: VirtualMac?
-    @State private var tab = Tab.macs
 
     var body: some View {
-        ZStack {
-            TabView(selection: $tab) {
-                HomeView(running: $running, tab: $tab)
-                    .tabItem { Label("Macs", systemImage: "macwindow") }
-                    .tag(Tab.macs)
-                InstallView()
-                    .tabItem { Label("Install", systemImage: "arrow.down.circle") }
-                    .tag(Tab.install)
-                SettingsView()
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
-                    .tag(Tab.settings)
-            }
-            .tint(Desk.accentLight)
-            if let running {
-                SessionView(mac: running) { self.running = nil }
-                    .transition(.opacity)
-            }
+        NavigationStack {
+            WinHomeView()
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $jit.showSetup) { JITSetupFlow() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
-            machines.collectImports()
             jit.enableAtLaunchIfAsked()
             // StikDebug can launch Henge before it attaches. A task also runs
             // on the first appearance, when there may be no phase change.
@@ -88,14 +70,6 @@ struct RootView: View {
             }
         }
         .onChange(of: jit.attachGeneration) { _ in JITBootstrap.prewarm() } // the built-in helper attached
-        .task { // testing only: HENGE_AUTOPILOT
-            await Autopilot.run { mac in
-                // A session still on screen (its Mac stopped) is closed first: the same value again would start nothing.
-                guard running != nil else { running = mac; return }
-                running = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { running = mac }
-            }
-        }
     }
 }
 

@@ -10,6 +10,22 @@ set -e
 # build/mac-restore, so tests on the Mac run the restore code iOS ships.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TP="$ROOT/third_party"
+
+# The restore layer itself (host/vm.c, install.c, usb_host.c, libusb_shim.c,
+# curl_shim.m and devices/vmapple*) was removed with the Windows direction
+# (f81479e). The app still passes -lhengerestore, so hand the linker an empty
+# archive instead of failing on sources that are no longer in the tree.
+if [ ! -f "$ROOT/host/libusb_shim.c" ]; then
+    echo "restore layer removed with the Windows direction; writing an empty libhengerestore.a"
+    mkdir -p "$ROOT/build/ios"
+    printf 'int henge_restore_layer_absent;\n' > "$ROOT/build/ios/henge_restore_stub.c"
+    SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+    xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$SDK" \
+        -c "$ROOT/build/ios/henge_restore_stub.c" -o "$ROOT/build/ios/henge_restore_stub.o"
+    xcrun --sdk iphoneos libtool -static -o "$ROOT/build/ios/libhengerestore.a" \
+        "$ROOT/build/ios/henge_restore_stub.o"
+    exit 0
+fi
 if [ "$1" = mac ]; then
     BUILD="$ROOT/build/mac-restore"
     SDKNAME=macosx
