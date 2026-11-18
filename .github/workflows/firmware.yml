@@ -16,12 +16,13 @@ name: firmware
 # (Secure Boot off), and the release is published with the token every workflow
 # already has -- it only needs `permissions: contents: write` below.
 
-# Pushing is what triggers it: no manual dispatch needed, and no path filter --
-# any push to the default branches rebuilds, so the asset is never stale.
+# Manual only, on purpose. The firmware has been built and published, and the
+# app now carries the two banks as bundle resources, so a run is only needed
+# after changing tools/build-firmware.sh, the edk2 pin, or this workflow --
+# not on every push. An automatic trigger would rebuild the same 128 MB and
+# clobber firmware-latest for nothing.
 on:
-  push:
-    branches: [main, master]
-  workflow_dispatch: # kept as an escape hatch, not the normal way in
+  workflow_dispatch: {}
 
 permissions:
   contents: write # create/update the firmware-latest release
