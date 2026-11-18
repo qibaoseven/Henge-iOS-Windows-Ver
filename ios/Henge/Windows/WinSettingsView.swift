@@ -8,6 +8,7 @@ struct WinSettingsView: View {
     @Binding var machine: WinMachine
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var engine = WinEngine.shared
+    @ObservedObject private var jit = JITCoordinator.shared
 
     @State private var importingPE = false
     @State private var importingPayload = false
@@ -32,6 +33,11 @@ struct WinSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("JIT") {
+                    LabeledContent("状态", value: JITBootstrap.ready ? "就绪" : "未就绪")
+                    Button("设置 JIT…") { jit.showSetup = true }
+                }
+
                 Section("名字") {
                     TextField("Windows 11", text: $machine.name)
                 }
@@ -123,6 +129,7 @@ struct WinSettingsView: View {
             } message: {
                 Text(importError ?? "")
             }
+            .sheet(isPresented: $jit.showSetup) { JITSetupFlow() }
         }
     }
 
