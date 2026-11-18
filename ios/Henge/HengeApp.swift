@@ -53,19 +53,31 @@ struct RootView: View {
             jit.enableAtLaunchIfAsked()
             // StikDebug can launch Henge before it attaches. A task also runs
             // on the first appearance, when there may be no phase change.
-            for _ in 0..<100 {
+            //
+            // LiveContainer marks the guest as CS_DEBUGGED at launch, before any
+            // debugger is servicing traps, so prewarming on that flag alone fails
+            // once and used to give up for the whole launch. Wait for a real
+            // debugger (P_TRACED), and keep waiting if the claim fails.
+            var triedTracedPrewarm = false
+            for _ in 0..<600 {
                 guard !Task.isCancelled else { return }
                 if JITBootstrap.prewarmed || JITBootstrap.isLive {
                     jit.objectWillChange.send()
                     return
                 }
-                if JITBootstrap.debuggedFlag || JITBootstrap.canGrantOwnJIT {
-                    JITBootstrap.prewarm()
-                    // Readiness lives outside the observable coordinator.
-                    jit.objectWillChange.send()
-                    return
+                if JITBootstrap.canGrantOwnJIT {
+                    if JITBootstrap.prewarm() {
+                        jit.objectWillChange.send()
+                        return
+                    }
+                } else if JITBootstrap.isTraced && !triedTracedPrewarm {
+                    triedTracedPrewarm = true
+                    if JITBootstrap.prewarm() {
+                        jit.objectWillChange.send()
+                        return
+                    }
                 }
-                do { try await Task.sleep(nanoseconds: 100_000_000) }
+                do { try await Task.sleep(nanoseconds: 250_000_000) }
                 catch { return } // going into the background cancels this wait
             }
         }
