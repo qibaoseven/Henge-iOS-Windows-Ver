@@ -57,6 +57,9 @@ jobs:
       # with the current firmware-latest assets.
       - name: Embed firmware into the bundle (first run only)
         working-directory: Henge
+        # A failed push must not kill the IPA: the files are already copied
+        # locally and the verify step below still holds. The next run retries.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REFRESH: ${{ github.event.inputs.refresh_firmware }}
@@ -85,13 +88,22 @@ jobs:
           cp /tmp/fw/code.fd /tmp/fw/vars.fd "$FW"/
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 128 MB in one commit: git's default 1 MB postBuffer dies with HTTP 413.
+          git config http.postBuffer 524288000
+          git config http.version HTTP/1.1
+          git config http.lowSpeedLimit 1000
+          git config http.lowSpeedTime 300
           git add "$FW/code.fd" "$FW/vars.fd"
           if git diff --cached --quiet; then
             echo "embedded firmware is already identical; nothing to commit"
             exit 0
           fi
           git commit -m "firmware: embed code.fd / vars.fd from firmware-latest"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}" || {
+            echo "push failed; rebasing on the remote branch and retrying once"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          }
 
       # Fail here, before Husk's ~30 minute dependency build, if the bundle does
       # not actually carry the banks: WinStore.prepare() looks them up as
@@ -192,3 +204,38 @@ jobs:
           name: Henge-tipa-${{ github.sha }}
           path: /Users/runner/Desktop/Henge.tipa
           if-no-files-found: error
+
+      # Symbols for lldb: package_ipa.sh only makes the .ipa, so this is where
+      # the Release build's .dSYM comes from.
+      - name: Upload dSYMs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Henge-dSYM-${{ github.sha }}
+          path: Henge/ios/build/DerivedData/Build/Products/Release-iphoneos/*.dSYM
+          if-no-files-found: warn
+
+      # Job logs live in blob storage, which is painful to read from a phone.
+      # On failure, put xcodebuild's full output in the repo (raw readable) so a
+      # diagnosis does not depend on a screenshot of the log.
+      - name: Publish the build log on failure
+        if: failure()
+        continue-on-error: true
+        working-directory: Henge
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -euxo pipefail
+          LOG=ios/build/DerivedData.buildlog
+          [ -f "$LOG" ] || { echo "xcodebuild never ran; no log"; exit 0; }
+          mkdir -p ci-logs
+          cp "$LOG" ci-logs/henge-build.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config http.postBuffer 524288000
+          git config http.version HTTP/1.1
+          git add -f ci-logs/henge-build.log
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "ci(ios): publish the Xcode build log [skip ci]"
+          git pull --rebase origin "$BRANCH_NAME" || true
+          git push origin "HEAD:$BRANCH_NAME" || true
