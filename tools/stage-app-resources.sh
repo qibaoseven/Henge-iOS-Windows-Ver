@@ -56,8 +56,10 @@ if [ -f "$DST/code.fd" ] || [ "$CHECK" = 1 ] && [ -f "$SRC_FW/code.fd" ]; then
     if [ "$sz" -lt $((60 * 1024 * 1024)) ]; then
         echo "  warning: code.fd 只有 $sz 字节，pflash 期望 64 MB"
     fi
-    if ! head -c 4096 "$code" | grep -q '_FVH'; then
-        echo "  warning: code.fd 开头没有 FV 头（_FVH），可能不是 UEFI 固件"
+    # ArmVirtQemu puts a 4-byte "b 0x1000" branch stub at offset 0 and the FV at
+    # 0x1000, so _FVH lands at 0x1028 -- past the first 4 KB.
+    if ! head -c 8192 "$code" | grep -q '_FVH'; then
+        echo "  warning: code.fd 开头 8 KB 内没有 FV 头（_FVH），可能不是 UEFI 固件"
     fi
 fi
 

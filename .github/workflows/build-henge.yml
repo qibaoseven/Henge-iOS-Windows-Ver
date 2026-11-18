@@ -15,7 +15,17 @@ name: Build Henge IPA
 
 # Manual only (Actions tab > Build Henge IPA > Run workflow): pushes to main don't build an IPA.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      refresh_firmware:
+        description: "重新从 firmware-latest 拉取并内嵌 code.fd / vars.fd（默认只在缺失时拉一次）"
+        type: boolean
+        default: false
+
+# contents: write is for the one-off firmware embed below (commit the two banks
+# into ios/Henge/Resources); everything else in this job only reads.
+permissions:
+  contents: write
 
 env:
   HUSK: ${{ github.workspace }}/Husk
@@ -37,6 +47,70 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: Henge
+
+      # code.fd / vars.fd are ordinary app resources (ios/Henge/Resources, which
+      # XcodeGen copies into Henge.app), not something the device fetches: the
+      # firmware release is only the source for the first commit. Doing it here
+      # keeps the IPA self-contained without a download step on every build --
+      # after the first run the two banks are in git and this is a no-op.
+      # 128 MB of repo history per embed; refresh_firmware=true replaces them
+      # with the current firmware-latest assets.
+      - name: Embed firmware into the bundle (first run only)
+        working-directory: Henge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REFRESH: ${{ github.event.inputs.refresh_firmware }}
+        run: |
+          set -euxo pipefail
+          FW=ios/Henge/Resources
+          need=0
+          if [ "$REFRESH" = "true" ]; then need=1; fi
+          for f in code.fd vars.fd; do [ -f "$FW/$f" ] || need=1; done
+          if [ "$need" = "0" ]; then
+            echo "firmware already in the bundle:"
+            ls -l "$FW/code.fd" "$FW/vars.fd"
+            exit 0
+          fi
+          gh release download firmware-latest -p code.fd -p vars.fd -D /tmp/fw --clobber
+          python3 - <<'PY'
+          import os, sys
+          for name in ('code.fd', 'vars.fd'):
+              p = os.path.join('/tmp/fw', name)
+              if os.path.getsize(p) != 64 << 20:
+                  sys.exit(f'{name}: not one 64 MB bank')
+              if b'_FVH' not in open(p, 'rb').read(0x2000):
+                  sys.exit(f'{name}: no FV header in the first 8 KB')
+          print('firmware assets: 64 MB each, FV header present')
+          PY
+          cp /tmp/fw/code.fd /tmp/fw/vars.fd "$FW"/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FW/code.fd" "$FW/vars.fd"
+          if git diff --cached --quiet; then
+            echo "embedded firmware is already identical; nothing to commit"
+            exit 0
+          fi
+          git commit -m "firmware: embed code.fd / vars.fd from firmware-latest"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      # Fail here, before Husk's ~30 minute dependency build, if the bundle does
+      # not actually carry the banks: WinStore.prepare() looks them up as
+      # Bundle.main code.fd / vars.fd and refuses to boot without them.
+      - name: Verify the bundled firmware
+        working-directory: Henge
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          for name in ('code.fd', 'vars.fd'):
+              p = os.path.join('ios/Henge/Resources', name)
+              if not os.path.exists(p):
+                  sys.exit(f'{p} is missing; run this workflow once to embed firmware-latest')
+              if os.path.getsize(p) != 64 << 20:
+                  sys.exit(f'{p}: {os.path.getsize(p)} bytes, expected one 64 MB bank')
+              if b'_FVH' not in open(p, 'rb').read(0x2000):
+                  sys.exit(f'{p}: no FV header in the first 8 KB')
+          print('firmware: code.fd / vars.fd, 64 MB each, FV header present')
+          PY
 
       # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
       # StikJIT.xcframework (vendored in Husk's repo, comes with checkout),
