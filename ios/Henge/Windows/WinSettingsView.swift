@@ -55,8 +55,9 @@ struct WinSettingsView: View {
                     Toggle("3D 加速（virgl）", isOn: $machine.gpu3d)
                         .disabled(machine.displayKind == 0)
                     Picker("面板分辨率", selection: panelBinding) {
-                        ForEach(panelChoices, id: \.self) { size in
-                            Text("\(size.0) × \(size.1)").tag("\(size.0)x\(size.1)")
+                        ForEach(panelChoices.indices, id: \.self) { i in
+                            Text("\(panelChoices[i].0) × \(panelChoices[i].1)")
+                                .tag("\(panelChoices[i].0)x\(panelChoices[i].1)")
                         }
                     }
                 } header: {
