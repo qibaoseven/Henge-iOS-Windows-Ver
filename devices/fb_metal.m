@@ -203,7 +203,7 @@ static atomic_uint_fast64_t g_frames;
                  y:(uint32_t)y
                 rw:(uint32_t)rw
                 rh:(uint32_t)rh
-             bytes:(void (^)(id<MTLBlitCommandEncoder> blit))encode {
+             bytes:(void (^)(id<MTLCommandBuffer> cb))encode {
     if (!pixels || !_texture || rw == 0 || rh == 0) return;
     NSUInteger tightRow = (NSUInteger)rw * 4u;
     NSUInteger needed = tightRow * (NSUInteger)rh;
@@ -221,7 +221,8 @@ static atomic_uint_fast64_t g_frames;
     [blit copyFromBuffer:staging
             sourceOffset:0
         sourceBytesPerRow:tightRow
-      sourceBytesPerHeight:rh
+       sourceBytesPerImage:needed
+              sourceSize:MTLSizeMake(rw, rh, 1)
                toTexture:_texture
         destinationSlice:0
         destinationLevel:0
