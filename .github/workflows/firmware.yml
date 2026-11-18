@@ -80,10 +80,13 @@ jobs:
               if size != bank:
                   sys.exit(f'{name} is {size} bytes, expected one 64 MB bank')
           with open('out/firmware/code.fd', 'rb') as f:
-              head = f.read(0x1000)
+              # ArmVirtQemu's FD starts with a 4-byte "b 0x1000" branch stub and
+              # puts the FV at 0x1000 (_FVH lands at 0x1028), so the first 4 KB
+              # never contains the signature.
+              head = f.read(0x2000)
           if b'_FVH' not in head:
-              sys.exit('code.fd has no firmware volume header')
-          print('code.fd: FV header present, 64 MB')
+              sys.exit('code.fd has no firmware volume header in the first 8 KB')
+          print('code.fd: FV header present' + (' at 0x1000' if b'_FVH' not in head[:0x1000] else '') + ', 64 MB')
           print('vars.fd: 64 MB')
           PY
           sha256sum out/firmware/*.fd | tee out/firmware/SHA256SUMS
