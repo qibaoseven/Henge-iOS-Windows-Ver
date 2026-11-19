@@ -1,0 +1,38 @@
+name: Fix xhci.c
+
+on:
+  push:
+    branches: [fix-xhci-c]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch the fixed xhci.c
+        run: curl -fsSL "https://aka.doubaocdn.com/s/qeTQxpLbwD" -o devices/xhci.c
+
+      - name: Verify the exact blob
+        run: |
+          set -euxo pipefail
+          test -s devices/xhci.c
+          grep -q 'port_event_sent' devices/xhci.c
+          grep -q 'One Port Status Change event per tick' devices/xhci.c
+          test "$(git hash-object devices/xhci.c)" = "38c510f1cc8810a3eb181c7e56bacbb3eae5597c"
+
+      - name: Commit to main
+        run: |
+          set -euxo pipefail
+          git config user.name "qibaoseven"
+          git config user.email "qibaoseven@qq.com"
+          git add devices/xhci.c
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "xhci: deliver one port change event per tick"
+          git push origin HEAD:main
