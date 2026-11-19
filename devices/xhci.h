@@ -50,6 +50,7 @@ typedef struct HvXhci {
     HvXhciRing cmd;
     int cmd_running;
     uint32_t portsc[HV_XHCI_PORTS];
+    int port_event_sent[HV_XHCI_PORTS]; /* its Port Status Change event is already queued */
     /* interrupters and their event rings */
     struct HvXhciIntr {
         uint32_t iman, imod, erstsz;
