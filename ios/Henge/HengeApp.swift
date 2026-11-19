@@ -10,6 +10,12 @@ struct HengeApp: App {
     init() {
         // Order matters: HengeLog takes over stderr, so the engine's and the JIT
         // allocator's first lines land in Documents/henge.log too.
+        // LiveContainer leaves a ~1.2 GB hole below 0x7000000000; a 1.5 GB JIT
+        // region cannot fit there, so StikDebug hands back an address above the
+        // ceiling where generated code does not run. Ask for the 1 GB cache.
+        if NSHomeDirectory().contains("/Documents/Data/Application/") {
+            UserDefaults.standard.set(1024, forKey: "henge.perf.codeCacheMB")
+        }
         HengeLog.start()
         HengeLog.log("boot", "address space: \(henge_largest_reservation_gb()) GB can be reserved in one piece")
         EngineTuning.apply()
