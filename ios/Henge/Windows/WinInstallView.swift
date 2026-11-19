@@ -69,6 +69,15 @@ struct WinInstallView: View {
             .controlSize(.large)
 
             Button {
+                WinDisplayView.toggleKeyboard()
+            } label: {
+                Image(systemName: "keyboard")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!engine.running)
+
+            Button {
                 engine.powerButton()
             } label: {
                 Image(systemName: "power")
