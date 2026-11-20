@@ -29,6 +29,25 @@ static void trace_close_at_exit(void) {
     hv_xhci_trace_close();
 }
 
+/* The diagnostic session that found the missing bNumConfigurations wrote every
+   MMIO read and every poll tick: ~290k lines in a few minutes, which is the
+   level of detail we actually need when a guest misbehaves. Full logging is
+   therefore the default. HV_XHCI_TRACE_QUIET=1 drops only the highest-frequency
+   lines (bar_read / poll # / run_tray) when the file would grow too fast for a
+   long session. */
+static int trace_full(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("HV_XHCI_TRACE_QUIET") == NULL;
+    return on;
+}
+
+static int trace_quiet_line(const char *fmt) {
+    if (trace_full()) return 0;
+    return strncmp(fmt, "bar_read", 8) == 0 ||
+           strncmp(fmt, "poll #", 6) == 0 ||
+           strncmp(fmt, "run_tray", 8) == 0;
+}
+
 void hv_xhci_trace_init(void) {
     if (g_trace) return;
 
@@ -81,7 +100,7 @@ const char *hv_xhci_trace_path(void) {
 }
 
 void hv_xhci_trace(const char *fmt, ...) {
-    if (!g_trace) return;
+    if (!g_trace || trace_quiet_line(fmt)) return;
 
     char now[32];
     trace_timestamp(now, sizeof now);
@@ -104,6 +123,7 @@ void hv_xhci_trace(const char *fmt, ...) {
 void hv_xhci_trace_ports(const char *where, const uint32_t *portsc, const int *sent,
                          int count, uint32_t usbsts) {
     if (!g_trace) return;
+    if (!trace_full() && strcmp(where, "poll") == 0) return;
     char now[32];
     trace_timestamp(now, sizeof now);
     pthread_mutex_lock(&g_trace_mu);
