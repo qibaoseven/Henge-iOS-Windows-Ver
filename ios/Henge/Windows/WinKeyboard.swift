@@ -32,6 +32,10 @@ enum WinHID {
 /// ⌃, ⌥, ⌘ and ⇧ stay down from a tap until the next key, exactly like UTM's
 /// accessory bar. Tapping Ctrl then C on the software keyboard therefore sends
 /// a real Ctrl+C, and the modifier is released after the C.
+///
+/// MainActor-isolated because WinEngine is: the sticky state is only ever
+/// touched from the accessory row and the text field, both of which are UI.
+@MainActor
 final class WinStickyKeys {
     static let shared = WinStickyKeys()
 
