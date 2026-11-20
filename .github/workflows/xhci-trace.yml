@@ -1,0 +1,418 @@
+name: xHCI full trace
+
+on:
+  push:
+    branches: [xhci-trace]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the full xHCI instrumentation patch
+        run: |
+          set -euxo pipefail
+          git apply --whitespace=nowarn - <<'PATCH'
+          diff --git a/devices/xhci.c b/devices/xhci.c
+          index 38c510f..907125f 100644
+          --- a/devices/xhci.c
+          +++ b/devices/xhci.c
+          @@ -1,4 +1,5 @@
+           #include "xhci.h"
+          +#include "xhci_trace.h"
+           
+           #include <stdio.h>
+           #include <stdlib.h>
+          @@ -194,9 +195,18 @@ static void load_segment(HvXhci *x, struct HvXhciIntr *it) {
+           static void event_to(HvXhci *x, int target, uint64_t param, uint32_t status, uint32_t control) {
+               int t = target >= 0 && target < HV_XHCI_INTRS ? target : 0;
+               struct HvXhciIntr *it = &x->intr[t];
+          -    if (!it->erstsz || !it->seg_size) return;
+          +    hv_xhci_trace("event_to target=%d param=%016llx status=%08x control=%08x erstsz=%u seg_size=%u index=%u pcs=%d usbcmd=%08x",
+          +                  t, (unsigned long long)param, status, control,
+          +                  it->erstsz, it->seg_size, it->index, it->pcs, x->usbcmd);
+          +    if (!it->erstsz || !it->seg_size) {
+          +        hv_xhci_trace("event_to DROP target=%d: event ring not programmed yet", t);
+          +        return;
+          +    }
+               uint32_t trb[4] = {(uint32_t)param, (uint32_t)(param >> 32), status, (control & ~1u) | (uint32_t)it->pcs};
+               wr(x, it->seg_base + 16ull * it->index, trb, 16);
+          +    hv_xhci_trace("event_to WROTE target=%d slot=%u trb={%08x,%08x,%08x,%08x} at=%016llx",
+          +                  t, it->index, trb[0], trb[1], trb[2], trb[3],
+          +                  (unsigned long long)(it->seg_base + 16ull * it->index));
+               if (++it->index == it->seg_size) {
+                   if (++it->seg_index >= it->erstsz) {
+                       it->seg_index = 0;
+          @@ -205,6 +215,8 @@ static void event_to(HvXhci *x, int target, uint64_t param, uint32_t status, uin
+                   load_segment(x, it);
+               }
+               x->usbsts |= 1u << 3; /* EINT */
+          +    hv_xhci_trace("event_to EINT set target=%d usbsts=%08x iman=%08x usbcmd=%08x",
+          +                  t, x->usbsts, it->iman, x->usbcmd);
+               if (hv_pci_msix_enabled(&x->pci)) {
+                   if ((it->iman & 2) && (x->usbcmd & 4)) {
+                       it->iman &= ~1u; /* xHCI 5.5.2.1: IP auto-cleared when MSI-X fires */
+          @@ -223,12 +235,20 @@ static void event(HvXhci *x, uint64_t param, uint32_t status, uint32_t control)
+           }
+           
+           static int port_event(HvXhci *x, int port) {
+          -    if (!(x->usbcmd & 1) || !x->intr[0].erstsz || !x->intr[0].seg_size) return 0;
+          +    hv_xhci_trace("port_event port=%d portsc=%08x usbcmd=%08x erstsz=%u seg_size=%u sent=%d",
+          +                  port + 1, x->portsc[port], x->usbcmd,
+          +                  x->intr[0].erstsz, x->intr[0].seg_size, x->port_event_sent[port]);
+          +    if (!(x->usbcmd & 1) || !x->intr[0].erstsz || !x->intr[0].seg_size) {
+          +        hv_xhci_trace("port_event SKIP port=%d: RUN=%d erstsz=%u seg_size=%u",
+          +                      port + 1, x->usbcmd & 1, x->intr[0].erstsz, x->intr[0].seg_size);
+          +        return 0;
+          +    }
+               event(x, (uint64_t)(port + 1) << 24, (uint32_t)CC_SUCCESS << 24, TRB_PORT_STATUS << 10);
+               return 1;
+           }
+           
+           static void cmd_completion(HvXhci *x, uint64_t trb_pa, int cc, int slot) {
+          +    hv_xhci_trace("cmd_completion trb=%016llx cc=%d slot=%d", (unsigned long long)trb_pa, cc, slot);
+               event(x, trb_pa, (uint32_t)cc << 24, TRB_CMD_COMPLETION << 10 | (uint32_t)slot << 24);
+           }
+           
+          @@ -255,9 +275,12 @@ static int ring_peek(HvXhci *x, HvXhciRing *r, uint32_t trb[4], uint64_t *at) {
+                   if (((trb[3] >> 10) & 0x3f) == TRB_LINK) {
+                       if (trb[3] & 2) r->ccs ^= 1;
+                       r->dequeue = ((uint64_t)trb[1] << 32 | trb[0]) & ~0xfull;
+          +            hv_xhci_trace("ring_peek LINK dequeue=%016llx ccs=%d", (unsigned long long)r->dequeue, r->ccs);
+                       continue;
+                   }
+                   *at = r->dequeue;
+          +        hv_xhci_trace("ring_peek TRB at=%016llx type=%u dw0=%08x dw1=%08x dw2=%08x dw3=%08x",
+          +                      (unsigned long long)*at, (trb[3] >> 10) & 0x3f, trb[0], trb[1], trb[2], trb[3]);
+                   return 1;
+               }
+               return 0;
+          @@ -285,6 +308,9 @@ static void set_ep_state(HvXhci *x, int slot, int dci, uint32_t state) {
+           static int cd_control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max);
+           
+           static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max) {
+          +    hv_xhci_trace("control port=%d slot? type=%02x req=%02x value=%04x index=%04x len=%u",
+          +                  sl->port, setup[0], setup[1], (uint16_t)(setup[2] | setup[3] << 8),
+          +                  (uint16_t)(setup[4] | setup[5] << 8), (uint16_t)(setup[6] | setup[7] << 8));
+               if (sl->port >= 3 && sl->port < 3 + HV_CD_TRAYS) return cd_control(x, sl, setup, out, max);
+               int is_tab = sl->port == 2;
+               uint8_t type = setup[0], req = setup[1];
+          @@ -362,6 +388,8 @@ static int cd_control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t
+               uint8_t type = setup[0], req = setup[1];
+               uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
+               uint16_t wlen = (uint16_t)(setup[6] | setup[7] << 8);
+          +    hv_xhci_trace("cd_control port=%d type=%02x req=%02x value=%04x index=%04x len=%u",
+          +                  sl->port, type, req, value, (uint16_t)(setup[4] | setup[5] << 8), wlen);
+               if (xlog())
+                   fprintf(stderr, "xhci cd: request %02x %02x value %04x len %u\n", type, req, value, wlen);
+               
+          @@ -422,6 +450,8 @@ static int cd_control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t
+           }
+           
+           static void run_ep0(HvXhci *x, int slot) {
+          +    hv_xhci_trace("run_ep0 slot=%d used=%d configured=%d ep_running=%d",
+          +                  slot, x->slots[slot].used, x->slots[slot].configured, x->slots[slot].ep_running[1]);
+               HvXhciSlot *sl = &x->slots[slot];
+               HvXhciRing *r = &sl->ep[1];
+               uint32_t trb[4];
+          @@ -510,6 +540,12 @@ static void run_ep0(HvXhci *x, int slot) {
+           }
+           
+           static int deliver_hid_in(HvXhci *x, int slot, const uint8_t *report, uint32_t rep_len) {
+          +    hv_xhci_trace("deliver_hid_in slot=%d len=%u report=%02x %02x %02x %02x %02x %02x %02x %02x",
+          +                  slot, rep_len,
+          +                  rep_len > 0 ? report[0] : 0, rep_len > 1 ? report[1] : 0,
+          +                  rep_len > 2 ? report[2] : 0, rep_len > 3 ? report[3] : 0,
+          +                  rep_len > 4 ? report[4] : 0, rep_len > 5 ? report[5] : 0,
+          +                  rep_len > 6 ? report[6] : 0, rep_len > 7 ? report[7] : 0);
+               HvXhciRing *r = &x->slots[slot].ep[HID_DCI_IN];
+               uint32_t trb[4];
+               uint64_t at;
+          @@ -556,6 +592,8 @@ static int deliver_hid_in(HvXhci *x, int slot, const uint8_t *report, uint32_t r
+           }
+           
+           static void run_ep_in(HvXhci *x) {
+          +    hv_xhci_trace("run_ep_in kbd_slot=%d tab_slot=%d reports=%u/%u tab=%u/%u",
+          +                  x->kbd_slot, x->tab_slot, x->rhead, x->rtail, x->thead, x->ttail);
+               pthread_mutex_lock(&x->mu);
+               /* Port 1: Keyboard */
+               if (x->kbd_slot && x->slots[x->kbd_slot].ep_running[HID_DCI_IN]) {
+          @@ -597,11 +635,14 @@ static void init_ring_from_ctx(HvXhci *x, int slot, int dci) {
+           }
+           
+           static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
+          +    hv_xhci_trace("address_device slot=%d input=%016llx bsr=%d", slot, (unsigned long long)input, bsr);
+               uint64_t out = out_ctx(x, slot);
+               uint8_t slot_ctx[32], ep0[32];
+               rd(x, input + 32, slot_ctx, 32);
+               rd(x, input + 64, ep0, 32);
+               int port = slot_ctx[6]; /* root hub port number (1 or 2) */
+          +    hv_xhci_trace("address_device slot=%d port=%d slot_ctx=%02x%02x%02x%02x", slot, port,
+          +                  slot_ctx[0], slot_ctx[1], slot_ctx[2], slot_ctx[3]);
+               if (port < 1 || port > HV_XHCI_PORTS) return CC_TRB_ERROR;
+               
+               uint32_t dw3 = (uint32_t)(bsr ? 1 : 2) << 27 | (uint32_t)(bsr ? 0 : slot);
+          @@ -627,6 +668,7 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
+           }
+           
+           static int configure_endpoints(HvXhci *x, int slot, uint64_t input, int deconfigure) {
+          +    hv_xhci_trace("configure_endpoints slot=%d input=%016llx deconfigure=%d", slot, (unsigned long long)input, deconfigure);
+               HvXhciSlot *sl = &x->slots[slot];
+               uint64_t out = out_ctx(x, slot);
+               if (deconfigure) {
+          @@ -674,6 +716,8 @@ static void run_commands(HvXhci *x) {
+                   uint64_t ptr = ((uint64_t)trb[1] << 32 | trb[0]) & ~0xfull;
+                   int cc = CC_SUCCESS;
+                   if (xlog()) fprintf(stderr, "xhci: command %d slot %d ptr %llx dw3 %08x\n", type, slot, (unsigned long long)ptr, trb[3]);
+          +        hv_xhci_trace("command type=%d slot=%d at=%016llx ptr=%016llx dw3=%08x",
+          +                      type, slot, (unsigned long long)at, (unsigned long long)ptr, trb[3]);
+                   switch (type) {
+                   case TRB_ENABLE_SLOT: {
+                       int s = 1;
+          @@ -775,6 +819,8 @@ static void run_commands(HvXhci *x) {
+           /* ---- ports ---- */
+           
+           static void ports_connect_init(HvXhci *x) {
+          +    hv_xhci_trace("ports_connect_init ports=%d cd_attached=%d,%d,%d",
+          +                  HV_XHCI_PORTS, x->cd_attached[0], x->cd_attached[1], x->cd_attached[2]);
+               for (int p = 0; p < HV_XHCI_PORTS; p++) {
+                   x->port_event_sent[p] = 0;
+                   if (p >= 2) {
+          @@ -784,13 +830,19 @@ static void ports_connect_init(HvXhci *x) {
+                       if (t < HV_CD_TRAYS && x->cd_attached[t] && x->cd[t].present)
+                           x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC |
+                                          ((uint32_t)SPEED_HIGH << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+          +            hv_xhci_trace("ports_connect_init port=%d CD%d portsc=%08x present=%d",
+          +                          p + 1, t + 1, x->portsc[p],
+          +                          t < HV_CD_TRAYS ? x->cd[t].present : -1);
+                       continue;
+                   }
+                   x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | ((uint32_t)SPEED_FULL << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+          +        hv_xhci_trace("ports_connect_init port=%d HID portsc=%08x", p + 1, x->portsc[p]);
+               }
+          +    hv_xhci_trace_ports("after-connect-init", x->portsc, x->port_event_sent, HV_XHCI_PORTS, x->usbsts);
+           }
+           
+           static void port_write(HvXhci *x, int p, uint32_t v) {
+          +    hv_xhci_trace("port_write port=%d value=%08x before=%08x sent=%d", p + 1, v, x->portsc[p], x->port_event_sent[p]);
+               if (xlog()) fprintf(stderr, "xhci: port %d write %08x (was %08x)\n", p, v, x->portsc[p]);
+               uint32_t s = x->portsc[p];
+               s &= ~(v & PORT_CHANGES);
+          @@ -799,6 +851,7 @@ static void port_write(HvXhci *x, int p, uint32_t v) {
+               if (v & PORT_PR) {
+                   s = (s & ~(0xfu << PORT_PLS_SHIFT)) | PORT_PED | PORT_PRC;
+                   x->portsc[p] = s;
+          +        hv_xhci_trace("port_write port=%d PR -> portsc=%08x", p + 1, s);
+                   port_event(x, p);
+                   return;
+               }
+          @@ -808,15 +861,18 @@ static void port_write(HvXhci *x, int p, uint32_t v) {
+                   if (pls == 0 || pls == 15) {
+                       s = (s & ~(0xfu << PORT_PLS_SHIFT)) | PORT_PLC;
+                       x->portsc[p] = s;
+          +            hv_xhci_trace("port_write port=%d LWS -> portsc=%08x", p + 1, s);
+                       port_event(x, p);
+                       return;
+                   }
+               }
+               s = (s & ~PORT_PP) | (v & PORT_PP);
+               x->portsc[p] = s;
+          +    hv_xhci_trace("port_write port=%d -> portsc=%08x", p + 1, s);
+           }
+           
+           static void reset(HvXhci *x) {
+          +    hv_xhci_trace("reset begin usbcmd=%08x usbsts=%08x", x->usbcmd, x->usbsts);
+               x->usbcmd = 0;
+               x->usbsts = 1; /* HCHalted */
+               x->dnctrl = x->config = 0;
+          @@ -834,6 +890,7 @@ static void reset(HvXhci *x) {
+               }
+               ports_connect_init(x);
+               update_irq(x);
+          +    hv_xhci_trace_ports("after-reset", x->portsc, x->port_event_sent, HV_XHCI_PORTS, x->usbsts);
+           }
+           
+           static uint32_t current_mfindex(const HvXhci *x) {
+          @@ -846,6 +903,7 @@ static uint32_t current_mfindex(const HvXhci *x) {
+           
+           static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
+               HvXhci *x = d->opaque;
+          +    hv_xhci_trace("bar_read bar=%d off=%04llx size=%u", bar, (unsigned long long)off, size);
+               if (bar != 0) return 0;
+               uint64_t v = 0;
+               if (off < CAPLENGTH) {
+          @@ -884,7 +942,11 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
+                   int p = (int)(off - PORTREGS) / 16;
+                   v = (off - PORTREGS) % 16 == 0 ? x->portsc[p] : 0;
+               } else if (off >= RT && off < RT + 0x20 + 32u * HV_XHCI_INTRS) {
+          -        if (off - RT < 0x20) return off == RT ? current_mfindex(x) : 0;
+          +        if (off - RT < 0x20) {
+          +            uint64_t rv = off == RT ? current_mfindex(x) : 0;
+          +            hv_xhci_trace("bar_read bar=%d off=%04llx size=%u -> %016llx (RT)", bar, (unsigned long long)off, size, (unsigned long long)rv);
+          +            return rv;
+          +        }
+                   struct HvXhciIntr *it = &x->intr[(off - RT - 0x20) / 32];
+                   switch ((off - RT - 0x20) % 32) {
+                   case 0x00: v = it->iman; break;
+          @@ -896,6 +958,7 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
+                   case 0x1c: v = it->erdp >> 32; break;
+                   }
+               }
+          +    hv_xhci_trace("bar_read bar=%d off=%04llx size=%u -> %016llx", bar, (unsigned long long)off, size, (unsigned long long)v);
+               return v;
+           }
+           
+          @@ -907,6 +970,8 @@ static void set64(uint64_t *f, uint64_t off_in_reg, uint64_t v, unsigned size) {
+           
+           static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t v, unsigned size) {
+               HvXhci *x = d->opaque;
+          +    hv_xhci_trace("bar_write bar=%d off=%04llx size=%u value=%016llx usbcmd=%08x usbsts=%08x",
+          +                  bar, (unsigned long long)off, size, (unsigned long long)v, x->usbcmd, x->usbsts);
+               if (bar != 0) return;
+               if (xlog() && off < DB) fprintf(stderr, "xhci: write +%llx = %llx (%u)\n", (unsigned long long)off, (unsigned long long)v, size);
+               if (off >= OP && off < PORTREGS) {
+          @@ -997,6 +1062,7 @@ static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t v, unsigned s
+           }
+           
+           void hv_xhci_key(HvXhci *x, uint8_t usage, int down) {
+          +    hv_xhci_trace("key usage=%02x down=%d", usage, down);
+               if (!x || !usage) return;
+               pthread_mutex_lock(&x->mu);
+               uint8_t *s = x->state;
+          @@ -1021,6 +1087,8 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down) {
+           }
+           
+           void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t wheel) {
+          +    hv_xhci_trace("tablet x=%d y=%d buttons=%02x wheel=%d thead=%u ttail=%u",
+          +                  abs_x, abs_y, buttons, wheel, x ? x->thead : 0, x ? x->ttail : 0);
+               if (!x) return;
+               if (abs_x < 0) abs_x = 0;
+               if (abs_x > 32767) abs_x = 32767;
+          @@ -1073,6 +1141,7 @@ static const uint8_t linux_to_hid[256] = {
+           };
+           
+           void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
+          +    hv_xhci_trace("key_linux code=%u down=%d hid=%02x", code, down, code < 256 ? linux_to_hid[code] : 0);
+               if (code < 256) hv_xhci_key(x, linux_to_hid[code], down);
+           }
+           
+          @@ -1081,6 +1150,9 @@ void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
+           static void run_tray(HvXhci *x, int tray) {
+               int slot = x->cd_slot[tray];
+               if (!slot) return;
+          +    hv_xhci_trace("run_tray tray=%d slot=%d ep_out=%d ep_in=%d",
+          +                  tray + 1, slot, x->slots[slot].ep_running[HV_CD_DCI_OUT],
+          +                  x->slots[slot].ep_running[HV_CD_DCI_IN]);
+               HvXhciSlot *sl = &x->slots[slot];
+               if (!sl->used) return;
+               HvUsbCd *cd = &x->cd[tray];
+          @@ -1108,6 +1180,12 @@ static void run_tray(HvXhci *x, int tray) {
+                       } else {
+                           uint8_t cbw[31];
+                           rd(x, buf, cbw, sizeof cbw);
+          +                hv_xhci_trace("cd%d CBW buf=%016llx len=%u sig=%08x tag=%08x xfer=%u flags=%02x lun=%u cdblen=%u",
+          +                              tray + 1, (unsigned long long)buf, want,
+          +                              (unsigned)cbw[0] | (unsigned)cbw[1] << 8 | (unsigned)cbw[2] << 16 | (unsigned)cbw[3] << 24,
+          +                              (unsigned)cbw[4] | (unsigned)cbw[5] << 8 | (unsigned)cbw[6] << 16 | (unsigned)cbw[7] << 24,
+          +                              (unsigned)cbw[8] | (unsigned)cbw[9] << 8 | (unsigned)cbw[10] << 16 | (unsigned)cbw[11] << 24,
+          +                              cbw[12], cbw[13], cbw[14]);
+                           hv_usb_cd_cbw(cd, cbw);
+                       }
+                       ring_advance(r);
+          @@ -1154,12 +1232,19 @@ static void run_tray(HvXhci *x, int tray) {
+           
+           void hv_xhci_poll(HvXhci *x) {
+               if (!x) return;
+          +    static unsigned long long polls;
+          +    polls++;
+          +    hv_xhci_trace("poll #%llu usbcmd=%08x usbsts=%08x cmd_running=%d kbd_slot=%d tab_slot=%d cd_slots=%d,%d,%d",
+          +                  polls, x->usbcmd, x->usbsts, x->cmd_running, x->kbd_slot, x->tab_slot,
+          +                  x->cd_slot[0], x->cd_slot[1], x->cd_slot[2]);
+          +    hv_xhci_trace_ports("poll", x->portsc, x->port_event_sent, HV_XHCI_PORTS, x->usbsts);
+               /* One Port Status Change event per tick, so each port gets its own interrupt.
+                  Queueing all five back-to-back at RUN lost everything after the keyboard:
+                  the firmware cleared EINT once and never looked at the rest of the ring. */
+               if (x->usbcmd & 1) {
+                   for (int p = 0; p < HV_XHCI_PORTS; p++) {
+                       if ((x->portsc[p] & PORT_CSC) && !x->port_event_sent[p]) {
+          +                hv_xhci_trace("poll selected port=%d portsc=%08x", p + 1, x->portsc[p]);
+                           if (port_event(x, p)) x->port_event_sent[p] = 1;
+                           break;
+                       }
+                   }
+          @@ -1173,6 +1258,7 @@ void hv_xhci_poll(HvXhci *x) {
+           /* Attach an image to the first free tray. Called before the guest starts, so the
+              port status is already correct when the firmware enumerates the bus. */
+           int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
+          +    hv_xhci_trace("attach_cd path=%s", iso_path ? iso_path : "(null)");
+               if (!x || !iso_path) return -1;
+               int rc = -1;
+               pthread_mutex_lock(&x->mu);
+          @@ -1185,6 +1271,9 @@ int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
+                       x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC |
+                                      ((uint32_t)SPEED_HIGH << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+                       x->port_event_sent[p] = 0;
+          +            hv_xhci_trace("attach_cd tray=%d port=%d portsc=%08x present=%d bytes=%llu",
+          +                          t + 1, p + 1, x->portsc[p], x->cd[t].present,
+          +                          (unsigned long long)x->cd[t].bytes);
+                   } else {
+                       hv_usb_cd_close(&x->cd[t]);
+                       rc = -1;
+          @@ -1195,6 +1284,7 @@ int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
+           }
+           
+           void hv_xhci_detach_cd(HvXhci *x) {
+          +    hv_xhci_trace("detach_cd begin");
+               if (!x) return;
+               pthread_mutex_lock(&x->mu);
+               for (int t = 0; t < HV_CD_TRAYS; t++) {
+          @@ -1205,9 +1295,12 @@ void hv_xhci_detach_cd(HvXhci *x) {
+                   x->port_event_sent[2 + t] = 0;
+               }
+               pthread_mutex_unlock(&x->mu);
+          +    hv_xhci_trace_ports("after-detach-cd", x->portsc, x->port_event_sent, HV_XHCI_PORTS, x->usbsts);
+           }
+           
+           HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
+          +    hv_xhci_trace_init();
+          +    hv_xhci_trace("xhci_create ports=%d slots=%d intr=%d", HV_XHCI_PORTS, HV_XHCI_SLOTS, HV_XHCI_INTRS);
+               HvXhci *x = calloc(1, sizeof *x);
+               x->m = m;
+               pthread_mutex_init(&x->mu, NULL);
+          @@ -1225,5 +1318,6 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
+                   return NULL;
+               }
+               reset(x);
+          +    hv_xhci_trace("xhci_create OK x=%p portsc0=%08x", (void *)x, x->portsc[0]);
+               return x;
+           }
+          PATCH
+
+      - name: Verify the exact instrumented blobs
+        run: |
+          set -euxo pipefail
+          test "$(git hash-object devices/xhci.c)" = "907125f425996acaa4c2883b4427635d91152b6b"
+          test "$(git hash-object devices/xhci_trace.c)" = "a60d7b974d2c8a19c3ff770ad009e253da9e94eb"
+          test "$(git hash-object devices/xhci_trace.h)" = "46851d2b06d080308df09fa65afa8bc9bee25809"
+
+      - name: Commit and push to main
+        run: |
+          set -euxo pipefail
+          git config user.name "qibaoseven"
+          git config user.email "qibaoseven@qq.com"
+          git add devices/xhci.c devices/xhci_trace.c devices/xhci_trace.h
+          git commit -m "xhci: add full MMIO, ring, port and transfer tracing"
+          git push origin HEAD:main
+
+      - name: Start the IPA build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          sleep 3
+          gh workflow run "Build Henge IPA" --ref main
