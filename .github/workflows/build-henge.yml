@@ -245,3 +245,7 @@ jobs:
           git commit -m "ci(ios): publish the Xcode build log [skip ci]"
           git pull --rebase origin "$BRANCH_NAME" || true
           git push origin "HEAD:$BRANCH_NAME" || true
+
+# Rebuild trigger: devices/xhci.c commit 6d919c4 was pushed by GITHUB_TOKEN and
+# therefore did not start a workflow; this comment makes the next build run on
+# the fixed source.
