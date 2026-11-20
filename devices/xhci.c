@@ -132,8 +132,12 @@ static const uint8_t cd_device_desc[18] = {
     0x48, 0x47, /* idVendor  "HG" */
     0x01, 0x00, /* idProduct */
     0x01, 0x01, /* bcdDevice 1.01 */
-    1, 2, 3     /* strings: manufacturer, product, serial */
+    1, 2, 3,    /* strings: manufacturer, product, serial */
+    1           /* bNumConfigurations: without this UEFI sees zero configurations
+                   and stops after the device descriptor, never reading the
+                   configuration or sending a single SCSI command */
 };
+_Static_assert(sizeof cd_device_desc == 18, "USB device descriptor must be 18 bytes");
 static const uint8_t cd_config_desc[32] = {
     9, 2, 32, 0, 1, 1, 0, 0x80, 50,                       /* configuration */
     9, 4, 0, 0, 2, 0x08, 0x06, 0x50, 0,                   /* interface: mass storage, SCSI, BOT */
@@ -1105,7 +1109,7 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
     rep[5] = (uint8_t)wheel;
     memcpy(x->tab_state, rep, 6);
 
-    /* Coalesce pure motion updates if queue has unconsumed entries and buttons/wheel match */
+    /* Coalesce pure motion updates if host hasn't consumed the previous one. */
     if (!wheel && x->ttail > x->thead) {
         uint8_t *prev = x->tab_reports[(x->ttail - 1) % HV_XHCI_REPORTS];
         if (prev[0] == rep[0] && prev[5] == 0) {
@@ -1145,7 +1149,7 @@ void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
     if (code < 256) hv_xhci_key(x, linux_to_hid[code], down);
 }
 
-/* ---- ports 3 and 4: the two CD trays ---- */
+/* ---- ports 3..5: the three CD trays ---- */
 
 static void run_tray(HvXhci *x, int tray) {
     int slot = x->cd_slot[tray];
