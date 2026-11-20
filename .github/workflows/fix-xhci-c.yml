@@ -16,15 +16,92 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Fetch the fixed xhci.c
-        run: curl -fsSL "https://aka.doubaocdn.com/s/qeTQxpLbwD" -o devices/xhci.c
+      - name: Apply the port-event patch
+        run: |
+          set -euxo pipefail
+          git apply --whitespace=nowarn - <<'PATCH'
+          diff --git a/devices/xhci.c b/devices/xhci.c
+          index 5fd544e..38c510f 100644
+          --- a/devices/xhci.c
+          +++ b/devices/xhci.c
+          @@ -222,9 +222,10 @@ static void event(HvXhci *x, uint64_t param, uint32_t status, uint32_t control)
+               event_to(x, 0, param, status, control);
+           }
+           
+          -static void port_event(HvXhci *x, int port) {
+          -    if (!(x->usbcmd & 1)) return;
+          +static int port_event(HvXhci *x, int port) {
+          +    if (!(x->usbcmd & 1) || !x->intr[0].erstsz || !x->intr[0].seg_size) return 0;
+               event(x, (uint64_t)(port + 1) << 24, (uint32_t)CC_SUCCESS << 24, TRB_PORT_STATUS << 10);
+          +    return 1;
+           }
+           
+           static void cmd_completion(HvXhci *x, uint64_t trb_pa, int cc, int slot) {
+          @@ -775,6 +776,7 @@ static void run_commands(HvXhci *x) {
+           
+           static void ports_connect_init(HvXhci *x) {
+               for (int p = 0; p < HV_XHCI_PORTS; p++) {
+          +        x->port_event_sent[p] = 0;
+                   if (p >= 2) {
+                       /* The CD trays only show a device once an image is attached. */
+                       int t = p - 2;
+          @@ -792,6 +794,7 @@ static void port_write(HvXhci *x, int p, uint32_t v) {
+               if (xlog()) fprintf(stderr, "xhci: port %d write %08x (was %08x)\n", p, v, x->portsc[p]);
+               uint32_t s = x->portsc[p];
+               s &= ~(v & PORT_CHANGES);
+          +    if (!(s & PORT_CSC)) x->port_event_sent[p] = 0;
+               if (v & PORT_PED) s &= ~PORT_PED;
+               if (v & PORT_PR) {
+                   s = (s & ~(0xfu << PORT_PLS_SHIFT)) | PORT_PED | PORT_PRC;
+          @@ -917,9 +920,6 @@ static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t v, unsigned s
+                       if ((v & 1) && !(x->usbcmd & 1)) {
+                           x->usbcmd = (uint32_t)v;
+                           x->usbsts &= ~1u;
+          -                for (int p = 0; p < HV_XHCI_PORTS; p++) {
+          -                    if (x->portsc[p] & PORT_CSC) port_event(x, p);
+          -                }
+                       } else if (!(v & 1)) {
+                           x->usbcmd = (uint32_t)v;
+                           x->usbsts |= 1u;
+          @@ -1154,6 +1154,17 @@ static void run_tray(HvXhci *x, int tray) {
+           
+           void hv_xhci_poll(HvXhci *x) {
+               if (!x) return;
+          +    /* One Port Status Change event per tick, so each port gets its own interrupt.
+          +       Queueing all five back-to-back at RUN lost everything after the keyboard:
+          +       the firmware cleared EINT once and never looked at the rest of the ring. */
+          +    if (x->usbcmd & 1) {
+          +        for (int p = 0; p < HV_XHCI_PORTS; p++) {
+          +            if ((x->portsc[p] & PORT_CSC) && !x->port_event_sent[p]) {
+          +                if (port_event(x, p)) x->port_event_sent[p] = 1;
+          +                break;
+          +            }
+          +        }
+          +    }
+               if (x->rhead != x->rtail || x->thead != x->ttail) run_ep_in(x);
+               for (int t = 0; t < HV_CD_TRAYS; t++)
+                   if (x->cd_slot[t]) run_tray(x, t);
+          @@ -1173,6 +1184,7 @@ int hv_xhci_attach_cd(HvXhci *x, const char *iso_path) {
+                       int p = 2 + t;
+                       x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC |
+                                      ((uint32_t)SPEED_HIGH << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+          +            x->port_event_sent[p] = 0;
+                   } else {
+                       hv_usb_cd_close(&x->cd[t]);
+                       rc = -1;
+          @@ -1190,6 +1202,7 @@ void hv_xhci_detach_cd(HvXhci *x) {
+                   x->cd_attached[t] = 0;
+                   x->cd_slot[t] = 0;
+                   x->portsc[2 + t] = PORT_PP;
+          +        x->port_event_sent[2 + t] = 0;
+               }
+               pthread_mutex_unlock(&x->mu);
+           }
+          PATCH
 
       - name: Verify the exact blob
         run: |
           set -euxo pipefail
-          test -s devices/xhci.c
-          grep -q 'port_event_sent' devices/xhci.c
-          grep -q 'One Port Status Change event per tick' devices/xhci.c
           test "$(git hash-object devices/xhci.c)" = "38c510f1cc8810a3eb181c7e56bacbb3eae5597c"
 
       - name: Commit to main
