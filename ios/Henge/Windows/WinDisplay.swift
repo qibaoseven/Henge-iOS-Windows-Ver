@@ -16,6 +16,7 @@ final class WinDisplayUIView: UIView, UITextFieldDelegate {
     private var mode: Mode = .none
     private var lastScrollY: CGFloat = 0
     private let keyField = UITextField()
+    private lazy var accessory = WinKeyboardAccessoryView(display: self)
 
     override var canBecomeFirstResponder: Bool { true }
 
@@ -30,6 +31,7 @@ final class WinDisplayUIView: UIView, UITextFieldDelegate {
         keyField.smartDashesType = .no
         keyField.returnKeyType = .default
         keyField.text = ""
+        keyField.inputAccessoryView = accessory
         keyField.alpha = 0.02
         keyField.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
         addSubview(keyField)
@@ -128,12 +130,17 @@ final class WinDisplayUIView: UIView, UITextFieldDelegate {
         return false
     }
 
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        // Never leave a sticky Ctrl/Option/Command down after the keyboard closes.
+        WinStickyKeys.shared.releaseAll()
+    }
+
     private func send(_ ch: Character) {
         guard let a = ch.asciiValue, let hit = usage(for: a) else { return }
-        if hit.1 {
-            WinEngine.shared.key(hid: 0xE1, down: true) // left Shift
+        if hit.1 && !WinStickyKeys.shared.isDown(WinHID.leftShift) {
+            WinEngine.shared.key(hid: WinHID.leftShift, down: true) // left Shift
             tap(hit.0)
-            WinEngine.shared.key(hid: 0xE1, down: false)
+            WinEngine.shared.key(hid: WinHID.leftShift, down: false)
         } else {
             tap(hit.0)
         }
@@ -142,6 +149,7 @@ final class WinDisplayUIView: UIView, UITextFieldDelegate {
     private func tap(_ usage: UInt8) {
         WinEngine.shared.key(hid: usage, down: true)
         WinEngine.shared.key(hid: usage, down: false)
+        WinStickyKeys.shared.releaseAll()
     }
 
     /// US layout, ASCII to USB HID usage; the Bool is "needs Shift".
@@ -198,7 +206,9 @@ struct WinDisplayView: UIViewRepresentable {
     static func toggleKeyboard() { WinDisplayUIView.current?.toggleKeyboard() }
 
     func makeUIView(context: Context) -> WinDisplayUIView {
-        let v = WinDisplayUIView()
+        // Explicit frame: the class now has its own init(frame:), so the bare
+        // WinDisplayUIView() convenience initialiser is no longer inherited.
+        let v = WinDisplayUIView(frame: .zero)
         v.backgroundColor = .black
         v.metalLayer.framebufferOnly = true
         v.metalLayer.isOpaque = true
