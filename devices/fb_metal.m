@@ -38,9 +38,12 @@
 #define HV_FB_MAX_FPS 60
 
 /* How many uint32 words of the frame go into the change signature. Sampling
-   every 512th word is enough to notice a cursor blink and cheap enough (a few
-   thousand loads) to run 100 times a second. */
-#define HV_FB_SIG_STEP 512
+   every 16th word is fine enough to see a single 8x16 text glyph (128 words)
+   and still cheap enough to run 100 times a second. The old step of 512 meant
+   two kilobytes between samples: most UEFI text updates fell in between and
+   only appeared when a cursor blink or scroll happened to hit a sampled word,
+   which is why the console seemed to refresh every few seconds. */
+#define HV_FB_SIG_STEP 16
 
 static NSString *const kHvFbVertexSource =
     @"#include <metal_stdlib>\n"
