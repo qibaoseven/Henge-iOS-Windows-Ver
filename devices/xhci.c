@@ -1109,7 +1109,7 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
     rep[5] = (uint8_t)wheel;
     memcpy(x->tab_state, rep, 6);
 
-    /* Coalesce pure motion updates if host hasn't consumed the previous one. */
+    /* Coalesce pure motion updates if queue has unconsumed entries and buttons/wheel match */
     if (!wheel && x->ttail > x->thead) {
         uint8_t *prev = x->tab_reports[(x->ttail - 1) % HV_XHCI_REPORTS];
         if (prev[0] == rep[0] && prev[5] == 0) {
@@ -1151,6 +1151,26 @@ void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
 
 /* ---- ports 3..5: the three CD trays ---- */
 
+static uint32_t cd_be32(const uint8_t *p) {
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | (uint32_t)p[3];
+}
+
+static uint16_t cd_be16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] << 8 | (uint16_t)p[1]); }
+
+/* Which LBA/length a CBW asks for, so failures show up in the trace. */
+static void cd_cbw_range(const uint8_t *cbw, uint32_t *lba, uint32_t *nblk) {
+    const uint8_t *cdb = cbw + 15;
+    *lba = 0;
+    *nblk = 0;
+    if (cdb[0] == 0x28) { /* READ(10) */
+        *lba = cd_be32(cdb + 2);
+        *nblk = cd_be16(cdb + 7);
+    } else if (cdb[0] == 0xa8) { /* READ(12) */
+        *lba = cd_be32(cdb + 2);
+        *nblk = cd_be32(cdb + 6);
+    }
+}
+
 static void run_tray(HvXhci *x, int tray) {
     int slot = x->cd_slot[tray];
     if (!slot) return;
@@ -1184,12 +1204,14 @@ static void run_tray(HvXhci *x, int tray) {
             } else {
                 uint8_t cbw[31];
                 rd(x, buf, cbw, sizeof cbw);
-                hv_xhci_trace("cd%d CBW buf=%016llx len=%u sig=%08x tag=%08x xfer=%u flags=%02x lun=%u cdblen=%u",
+                uint32_t lba = 0, nblk = 0;
+                cd_cbw_range(cbw, &lba, &nblk);
+                hv_xhci_trace("cd%d CBW buf=%016llx len=%u sig=%08x tag=%08x xfer=%u flags=%02x lun=%u cdblen=%u op=%02x lba=%u nblk=%u",
                               tray + 1, (unsigned long long)buf, want,
                               (unsigned)cbw[0] | (unsigned)cbw[1] << 8 | (unsigned)cbw[2] << 16 | (unsigned)cbw[3] << 24,
                               (unsigned)cbw[4] | (unsigned)cbw[5] << 8 | (unsigned)cbw[6] << 16 | (unsigned)cbw[7] << 24,
                               (unsigned)cbw[8] | (unsigned)cbw[9] << 8 | (unsigned)cbw[10] << 16 | (unsigned)cbw[11] << 24,
-                              cbw[12], cbw[13], cbw[14]);
+                              cbw[12], cbw[13], cbw[14], cbw[15], lba, nblk);
                 hv_usb_cd_cbw(cd, cbw);
             }
             ring_advance(r);
@@ -1225,8 +1247,18 @@ static void run_tray(HvXhci *x, int tray) {
                 done += n;
                 if (is_csw) break;
             }
+            if (is_csw && done >= 13) {
+                const uint8_t *csw = x->cd_buf + done - 13;
+                hv_xhci_trace("cd%d CSW tag=%08x resid=%u status=%u",
+                              tray + 1,
+                              (unsigned)csw[4] | (unsigned)csw[5] << 8 | (unsigned)csw[6] << 16 | (unsigned)csw[7] << 24,
+                              (unsigned)csw[8] | (unsigned)csw[9] << 8 | (unsigned)csw[10] << 16 | (unsigned)csw[11] << 24,
+                              csw[12]);
+            }
             ring_advance(r);
             int short_pkt = done < want;
+            hv_xhci_trace("cd%d IN at=%016llx want=%u done=%u resid=%u short=%d csw=%d",
+                          tray + 1, (unsigned long long)at, want, done, want - done, short_pkt, is_csw);
             if (ioc || short_pkt)
                 transfer_event(x, at, short_pkt ? CC_SHORT_PACKET : CC_SUCCESS, want - done, slot, HV_CD_DCI_IN);
             if (!ch) return;
