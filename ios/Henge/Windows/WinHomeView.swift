@@ -87,11 +87,9 @@ struct WinHomeView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("内存") {
-                    Picker("内存", selection: $newRAM) {
-                        ForEach([4096, 6144, 8192], id: \.self) {
-                            Text("\($0 / 1024) GB").tag($0)
-                        }
-                    }
+                    /* The same control as the settings page: a full Windows 11
+                       wants 4-6 GB, a Tiny11 image is happy at 256 MB. */
+                    WinMemoryControl(mb: $newRAM)
                 }
             }
             .navigationTitle("新建 Windows 虚拟机")

@@ -1,0 +1,270 @@
+# .github/workflows/variants.yml
+#
+# One IPA per core. Same app, engine built with a different -mcpu, packaged under
+# a name that says which core it is for, all published on one release so a device
+# can take the build tuned for the chip it actually has.
+#
+# Cores that share silicon share a build, and the name says so:
+#   a10 -> A10X     (A10 and A10X are the same CPU cores; the build is named for
+#                   the device class that actually runs iOS 17)
+#   a12 -> A12-A12X (likewise)
+#   a14 -> A14-M1   (A14 and M1 are the same cores)
+#   a15 -> A15-M2
+#   a16 -> A16-M3
+#   a18 -> A18-M4
+# M5 is its own core, so M5 is its own build. M6 and A20 Pro are newer than what
+# Xcode's clang knows and are built with an LLVM 24 nightly when one is provided
+# (llvm24_dir); without it they fall back to the architecture tier and say so in
+# flags.csv.
+#
+# Two ways to run it:
+#   only_m4 = true (default) -> just M4, the iPad this is developed on.
+#   only_m4 = false          -> the whole list, 15 builds, most of an hour of
+#                               runner time after the dependency build.
+#
+# This is manual on purpose: the dependency build (Husk's glib/libslirp/prebuilt
+# pieces) takes most of an hour, and every variant after that is two xcodebuilds.
+#
+#   Actions -> Build per-core variants -> Run workflow.
+#
+# The core list is a wish list, not a promise: -mcpu=apple-a14 only works if the
+# compiler knows that core, so each flag is probed first and the step falls back
+# to an -march tier, then to plain arm64 (which every arm64 iOS device runs).
+# Whatever it ends up using is printed and recorded in flags.csv.
+#
+# Deployment floor is iOS 17.0, which is what the app target needs. The A10 build
+# is A10X in practice: iPad Pro 2nd gen runs iPadOS 17, while the iPad 6 sharing
+# its CPU cores stops at 16.7 and the iPhone 7 at 15.8 -- so an A10-silicon app
+# installs on A10X devices only. That is what the name says.
+
+name: Build per-core variants
+
+on:
+  workflow_dispatch:
+    inputs:
+      only_m4:
+        description: "Only build M4 (the iPad this is developed on). Off = the whole list."
+        type: boolean
+        default: true
+      cores:
+        description: "Used when only_m4 is off: a10,a11,a12,a13,a14,a15,a16,a17pro,a18,a18pro,a19,a19pro,a20pro,m5,m6"
+        type: string
+        default: "a10,a11,a12,a13,a14,a15,a16,a17pro,a18,a18pro,a19,a19pro,a20pro,m5,m6"
+      llvm24_dir:
+        description: "Directory holding an LLVM 24 nightly's bin/clang, for a20pro and m6. Empty = Xcode's clang."
+        type: string
+        default: ""
+      publish:
+        description: "Publish the IPAs on the variants release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  HUSK: ${{ github.workspace }}/Husk
+  IOS_DEPS: ${{ github.workspace }}/Husk/build/ios-arm64/sysroot
+
+jobs:
+  variants:
+    runs-on: xcode-27
+    # The dependency build is most of an hour; the full list is 15 builds of two
+    # xcodebuilds each. M4 alone is ten minutes after the dependencies.
+    timeout-minutes: 720
+
+    steps:
+      - name: Check out HaloWin
+        uses: actions/checkout@v4
+        with:
+          path: Henge
+
+      - name: Check out Husk
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          path: Husk
+
+      - name: Cache Husk's sources and prebuilt iOS pieces
+        uses: actions/cache@v4
+        with:
+          path: |
+            Husk/third_party
+            Husk/build/ios-arm64
+          key: husk-ios-${{ hashFiles('Husk/scripts/fetch_sources.sh', 'Husk/scripts/build_ios.sh') }}
+
+      - name: Install build tools
+        run: |
+          set -euxo pipefail
+          brew install xcodegen meson ninja pkg-config
+          rustup target add aarch64-apple-ios || {
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            rustup target add aarch64-apple-ios
+          }
+
+      - name: Fetch Husk's third-party sources
+        working-directory: Husk
+        run: bash scripts/fetch_sources.sh
+
+      - name: Build the iOS libraries HaloWin needs
+        working-directory: Husk
+        run: bash scripts/build_ios.sh libffi glib libslirp
+
+      - name: Build Husk's on-device pairing library
+        working-directory: Husk
+        run: bash scripts/build_rppairing_ios.sh
+
+      - name: Copy prebuilt deps into HaloWin
+        working-directory: Henge
+        run: zsh ios/scripts/fetch_deps.sh
+
+      - name: Build the restore stack
+        working-directory: Henge
+        run: zsh tools/build_ios_restore.sh
+
+      - name: Build and package one IPA per core
+        working-directory: Henge
+        env:
+          ONLY_M4: ${{ inputs.only_m4 }}
+          CORES_IN: ${{ inputs.cores }}
+          LLVM24_DIR: ${{ inputs.llvm24_dir }}
+          MIN_IOS: "17.0"
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/Desktop/dist"
+          echo "core,label,compiler,engine_flags,xcode_flags" > "$HOME/Desktop/dist/flags.csv"
+
+          if [ "$ONLY_M4" = "true" ] || [ -z "$CORES_IN" ]; then
+            CORES="a18"          # M4 is A18 silicon
+            echo "==> only_m4: building A18-M4"
+          else
+            CORES="$(echo "$CORES_IN" | tr ',' ' ')"
+            echo "==> full list: $CORES"
+          fi
+
+          # The name a user sees and the file is called: same silicon, one build.
+          label() {
+            case "$1" in
+              # A10 is A10X's CPU cores too; only A10X devices run iOS 17.
+              a10)    echo "A10X" ;;
+              # Same for A12 and A12X.
+              a12)    echo "A12-A12X" ;;
+              a14)    echo "A14-M1" ;;   # A14 and M1 are the same cores
+              a15)    echo "A15-M2" ;;
+              a16)    echo "A16-M3" ;;
+              a18)    echo "A18-M4" ;;
+              a17pro) echo "A17Pro" ;;
+              a18pro) echo "A18Pro" ;;
+              a20pro) echo "A20Pro" ;;
+              *)      echo "$1" | tr 'a-z' 'A-Z' ;;
+            esac
+          }
+
+          # Newer than Xcode's clang: those want the LLVM nightly for the engine.
+          wants_llvm24() {
+            case "$1" in a20pro|m6) return 0 ;; *) return 1 ;; esac
+          }
+
+          # core -> the minimum architecture that core can execute, as a fallback
+          tier() {
+            case "$1" in
+              a10|a11)                 echo "armv8-a" ;;
+              a12|a13)                 echo "armv8.2-a" ;;
+              a14|a15|a16)             echo "armv8.5-a" ;;
+              a17pro|a18|a18pro)       echo "armv8.6-a" ;;
+              a19|a19pro|a20pro|m5|m6) echo "armv9-a" ;;
+              *)                       echo "armv8-a" ;;
+            esac
+          }
+
+          probe() {  # probe <compiler> <flags...> -> 0 if that compiler accepts them
+            cc="$1"; shift
+            printf 'int main(void){return 0;}\n' > /tmp/probe.c
+            $cc -arch arm64 -miphoneos-version-min="$MIN_IOS" \
+              -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" "$@" \
+              -c /tmp/probe.c -o /tmp/probe.o >/dev/null 2>&1
+          }
+
+          XCODE_CLANG="$(xcrun --sdk iphoneos --find clang)"
+
+          for core in $CORES; do
+            [ -n "$core" ] || continue
+            name="$(label $core)"
+
+            # Which clang builds the engine for this core.
+            if wants_llvm24 $core; then
+              if [ -n "$LLVM24_DIR" ] && [ -x "$LLVM24_DIR/bin/clang" ]; then
+                engine_clang="$LLVM24_DIR/bin/clang"
+                compiler="llvm24"
+              else
+                engine_clang="$XCODE_CLANG"
+                compiler="xcode-clang"
+                echo "  $core: wants LLVM 24, none at llvm24_dir: Xcode's clang, falling back to a tier"
+              fi
+            else
+              engine_clang="$XCODE_CLANG"
+              compiler="xcode-clang"
+            fi
+
+            # Engine flags: the core itself if known, else its architecture tier,
+            # else nothing (plain arm64 runs everywhere).
+            engine_flags=""
+            for cand in "-mcpu=apple-$core" "-march=$(tier $core)"; do
+              if probe "$engine_clang" $cand; then engine_flags="$cand"; break; fi
+              echo "  $core: $cand not accepted by $compiler"
+            done
+
+            # Xcode's own C files are compiled by Xcode's clang, so they only get
+            # flags that compiler accepts -- otherwise the app build itself fails.
+            xcode_flags=""
+            for cand in "-mcpu=apple-$core" "-march=$(tier $core)"; do
+              if probe "$XCODE_CLANG" $cand; then xcode_flags="$cand"; break; fi
+            done
+
+            echo "  $core ($name): engine [$engine_flags] xcode [$xcode_flags]"
+            echo "$core,$name,$compiler,$engine_flags,$xcode_flags" >> "$HOME/Desktop/dist/flags.csv"
+
+            suffix="-$core"
+            rm -rf "build/ios$suffix" "build/ios$suffix-rel" "build/DD$suffix" "build/DD$suffix-rel"
+            IOS_CLANG="$engine_clang" make ios-lib IOS_MIN="$MIN_IOS" IOS_TUNE="$engine_flags" IOS_SFX="$suffix"
+            # Where make put the engine for this core (build/ios-a18, build/ios-a18-rel
+            # for DEBUG=0): asked, not guessed, so the link cannot pick up another core's library.
+            engine_dir="$(IOS_CLANG="$engine_clang" make -s print-ib DEBUG="${DEBUG:-1}" IOS_SFX="$suffix")"
+            echo "  $name: engine in $engine_dir"
+
+            # IOS_CLANG goes into the environment too, so the engine's script phase
+            # inside xcodebuild compiles with the same compiler as above.
+            for variant in ipa tipa; do
+              flag=""; [ "$variant" = tipa ] && flag="--trollstore"
+              IOS_CLANG="$engine_clang" HENGE_IPA_NAME="HaloWin-$name" HENGE_DD="$PWD/build/DD$suffix" \
+                HENGE_ENGINE_DIR="$engine_dir" \
+                HENGE_XC_FLAGS="IPHONEOS_DEPLOYMENT_TARGET=$MIN_IOS OTHER_CFLAGS=$xcode_flags" \
+                zsh ios/scripts/package_ipa.sh $flag
+              mv "$HOME/Desktop/HaloWin-$name.$variant" "$HOME/Desktop/dist/"
+            done
+          done
+
+          ls -l "$HOME/Desktop/dist"
+          cat "$HOME/Desktop/dist/flags.csv"
+
+      - name: Upload the variants as workflow artifacts too
+        uses: actions/upload-artifact@v4
+        with:
+          name: HaloWin-variants-${{ github.sha }}
+          path: |
+            /Users/runner/Desktop/dist/*
+
+      - name: Publish on the variants release
+        if: inputs.publish
+        working-directory: Henge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          # One tag for all variants: whatever this run produced replaces the
+          # previous set, so the release always matches the listed cores.
+          gh release delete variants --cleanup-tag --yes || true
+          gh release create variants --prerelease --target "$GITHUB_SHA" \
+            --title "HaloWin, one build per core" \
+            --notes "Built from \`$GITHUB_SHA\`. Core name is in the file name; flags.csv says what each build actually used." \
+            "$HOME/Desktop/dist"/*.ipa "$HOME/Desktop/dist"/*.tipa "$HOME/Desktop/dist/flags.csv"

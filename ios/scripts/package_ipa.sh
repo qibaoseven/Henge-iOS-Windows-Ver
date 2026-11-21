@@ -9,15 +9,33 @@ set -e
 IOS="$(cd "$(dirname "$0")/.." && pwd)"
 TROLLSTORE=false
 [ "$1" = "--trollstore" ] && TROLLSTORE=true
-OUT="$HOME/Desktop/Henge.ipa"
-[ "$TROLLSTORE" = true ] && OUT="$HOME/Desktop/Henge.tipa"
+# HENGE_IPA_NAME renames the product (per-chip variants), HENGE_XC_FLAGS adds
+# xcodebuild settings (OTHER_CFLAGS=... for a core), HENGE_DD redirects DerivedData
+# so variants do not overwrite each other's products.
+# DEBUG defaults to 1: -O2 with line tables, the build stall dumps are read
+# against. DEBUG=0 is the shipping build -- the engine links with LTO, so Xcode's
+# own C files go to -O3 and the link gets -flto (HENGE_LDFLAGS, wired in
+# ios/project.yml). Same switch as the Makefile's.
+NAME="${HENGE_IPA_NAME:-HaloWin}"
+OUT="$HOME/Desktop/$NAME.ipa"
+[ "$TROLLSTORE" = true ] && OUT="$HOME/Desktop/$NAME.tipa"
 [ -d "$IOS/deps/StikJIT.xcframework" ] || "$IOS/scripts/fetch_deps.sh"
 cd "$IOS"
 xcodegen generate >/dev/null
-DD="$IOS/build/DerivedData"
+DD="${HENGE_DD:-$IOS/build/DerivedData}"
+OPT_ARGS=""
+if [ "${DEBUG:-1}" = "0" ]; then
+    # Same switch as the Makefile: Xcode's own C files to -O3, the engine's
+    # objects are LTO, so the link takes -flto and looks in build/ios-rel.
+    OPT_ARGS="GCC_OPTIMIZATION_LEVEL=3 HENGE_LDFLAGS=-flto"
+    # Where -O3 objects went. The caller knows this for a per-core build
+    # (HENGE_ENGINE_DIR=build/ios-m4-rel); the plain build gets build/ios-rel.
+    [ -n "${HENGE_ENGINE_DIR:-}" ] || OPT_ARGS="$OPT_ARGS HENGE_ENGINE_DIR=build/ios-rel"
+fi
 mkdir -p "$IOS/build"
 xcodebuild -project Henge.xcodeproj -scheme Henge -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
-    -derivedDataPath "$DD" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > "$DD.buildlog" 2>&1 || {
+    -derivedDataPath "$DD" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+    ${=HENGE_XC_FLAGS} ${=OPT_ARGS} build > "$DD.buildlog" 2>&1 || {
     # Never package what an older build left behind.
     grep -E "error:|BUILD" "$DD.buildlog" | sort -u
     echo "==> the build failed; nothing packaged" >&2
@@ -26,9 +44,7 @@ xcodebuild -project Henge.xcodeproj -scheme Henge -configuration Release -sdk ip
 grep -E "BUILD" "$DD.buildlog" || true
 APP="$DD/Build/Products/Release-iphoneos/Henge.app"
 rc=0
-for f in "$APP/Henge" "$APP/henge-jit.js" "$APP/code.fd" "$APP/vars.fd" \
-         "$APP/PlugIns/HengeJITHelper.appex/HengeJITHelper" \
-         "$APP/Frameworks/StikJIT.framework/StikJIT" "$APP/Frameworks/StikJIT.framework/Info.plist"; do
+for f in "$APP/Henge" "$APP/henge-jit.js" "$APP/code.fd" "$APP/vars.fd"; do
     if [ -f "$f" ]; then printf "  ok       %s\n" "${f#$APP/}"; else echo "  MISSING  ${f#$APP/}" >&2; rc=1; fi
 done
 [ $rc -eq 0 ] || { echo "==> bundle is not installable; refusing to package" >&2; exit 1; }

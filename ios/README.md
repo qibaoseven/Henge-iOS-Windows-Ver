@@ -14,7 +14,8 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
 
 - **JIT**: on iOS 26+ (TXM) only an attached debugger can grant executable
   memory. Henge uses the same machinery as Husk: StikDebug, TrollStore, a
-  jailbreak, or the built-in StikJIT helper (`HengeJITHelper.appex`, with
+  jailbreak, or StikDebug (the walkthrough covers all three; the built-in
+  helper the project used to ship as `HengeJITHelper.appex` is gone -- see
   on-device pairing on iOS 27). The app claims one 1 GB region per launch
   (`JITBootstrap.jitBytes`) and the engine writes through a `vm_remap`'d alias
   (`host/jit_region.c`, split mode).
@@ -64,6 +65,7 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
   macOS uses and which run as they are, so Henge needs an A14 or M1 or newer.
 
 Code from Husk (GPL-2.0-or-later): `Henge/JIT/*`, `Henge/HengeLog.swift`,
-`Henge/Native/henge-ios-jit.*`, `henge-brk.S`, `HengeJITHelper/`. StikJIT is
+`Henge/Native/henge-ios-jit.*`, `henge-brk.S`. StikJIT (the framework the
+removed helper linked) is no longer embedded.
 MPL-2.0 and idevice MIT (`Henge/Resources/legal/`); `tcg-apple-jit.h` is QEMU's
 (LGPL-2.1). See [docs/licensing.md](../docs/licensing.md).

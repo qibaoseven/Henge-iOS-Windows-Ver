@@ -16,7 +16,6 @@ struct WinSettingsView: View {
     @State private var confirmReplaceDisk = false
     @State private var importError: String?
 
-    private let ramChoices = [4096, 6144, 8192, 12288]
     private let panelChoices: [(Int, Int)] = [(1024, 768), (1280, 800), (1440, 900), (1920, 1200)]
     private var panelBinding: Binding<String> {
         Binding(
@@ -43,9 +42,11 @@ struct WinSettingsView: View {
                 }
 
                 Section("内存（板子就这么大，别贪）") {
-                    Picker("内存", selection: $machine.ramMB) {
-                        ForEach(ramChoices, id: \.self) { Text("\($0 / 1024) GB").tag($0) }
-                    }
+                    /* A ladder and a box, not three preset sizes: the guest gets
+                       exactly what the engine is handed, so 256 MB for Tiny11,
+                       3.5 GB for a small full install, and 1145 MB for no reason
+                       at all are all expressible. */
+                    WinMemoryControl(mb: $machine.ramMB)
                     /* A stepper, not a text field: a TextField appends, so the
                        old "6" plus a new "1" read as 61 and the clamp turned
                        that into 8 -- any key appeared to produce 8. This walks

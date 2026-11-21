@@ -201,20 +201,21 @@ jobs:
       # inside is. Release assets are served as the file itself, so the IPA is
       # published there and nothing else: one rolling release named "latest",
       # recreated every build so the asset names stay Henge.ipa / Henge.tipa.
-      - name: Publish Henge.ipa and Henge.tipa (direct download, no zip)
+      - name: Publish HaloWin.ipa and HaloWin.tipa (direct download, no zip)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          ls -l /Users/runner/Desktop/HaloWin.ipa /Users/runner/Desktop/HaloWin.tipa
           cd Henge
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           gh release create latest \
             --target "${{ github.sha }}" \
-            --title "Henge build ${GITHUB_SHA:0:8}" \
-            --notes "Built from \`${GITHUB_SHA}\` (run ${GITHUB_RUN_ID}). Henge.ipa is unsigned/ad-hoc; Henge.tipa is the TrollStore build." \
+            --title "HaloWin build ${GITHUB_SHA:0:8}" \
+            --notes "Built from \`${GITHUB_SHA}\` (run ${GITHUB_RUN_ID}). HaloWin.ipa is unsigned/ad-hoc; HaloWin.tipa is the TrollStore build." \
             --prerelease \
-            /Users/runner/Desktop/Henge.ipa \
-            /Users/runner/Desktop/Henge.tipa
+            /Users/runner/Desktop/HaloWin.ipa \
+            /Users/runner/Desktop/HaloWin.tipa
 
       # Symbols for lldb: package_ipa.sh only makes the .ipa, so this is where
       # the Release build's .dSYM comes from.

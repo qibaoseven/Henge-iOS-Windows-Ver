@@ -164,11 +164,47 @@ clean:
 # make ios-lib -> build/ios/libhengevm.a. Networking links the arm64 iOS builds
 # of libslirp and glib from Husk's sysroot (scripts there make them); see ios/README.md.
 IOS_SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
-IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot $(IOS_SDK)
+# Which iOS, and which core, this engine is built for. A variant build sets all
+# three from the outside; the defaults are the ordinary build.
+#   IOS_MIN  the deployment floor (17.0 is what the app target needs)
+#   IOS_TUNE flags that pick a core, e.g. -mcpu=apple-a14 (empty = baseline arm64,
+#            which every arm64 iOS device runs, so no flag means "lowest")
+#   IOS_SFX  suffix on the object directory, so variants never share objects
+IOS_MIN ?= 17.0
+IOS_TUNE ?=
+IOS_SFX ?=
+# DEBUG=1 (the default) keeps line tables and -O2: the build the stall dumps are
+# read against, with the addresses in henge.log matching a disassembly you can
+# follow. DEBUG=0 is the shipping build: -O3 and LTO. It changes timing and it
+# inlines across files, so it is opt-in and not what CI ships while the boot is
+# still being fixed. Passing DEBUG=0 to package_ipa.sh sets the same thing for
+# the C files Xcode compiles and for the link (see HENGE_LDFLAGS there).
+DEBUG ?= 1
+ifeq ($(DEBUG),1)
+IOS_OPT ?= -O2 -g
+IOS_LTO ?=
+else
+IOS_OPT ?= -O3
+IOS_LTO ?= -flto
+endif
+# Which clang compiles the engine. Xcode's own by default; a newer LLVM can be
+# pointed at when a core exists that Xcode's clang does not know yet (a20pro and
+# m6 need LLVM 24). The SDK still comes from Xcode -- only the compiler is
+# swapped -- so this takes a full path to a clang binary.
+#   make ios-lib IOS_CLANG=/opt/llvm24/bin/clang IOS_TUNE="-mcpu=apple-m6"
+IOS_CLANG ?= xcrun --sdk iphoneos clang
+IOS_CC = $(IOS_CLANG) -arch arm64 -miphoneos-version-min=$(IOS_MIN) -isysroot $(IOS_SDK) $(IOS_TUNE)
 # ios/deps/include/slirp first when it holds libslirp's headers (they are all the engine takes from there).
 IOS_DEPS ?= $(if $(wildcard ios/deps/include/slirp/libslirp.h),$(CURDIR)/ios/deps,$(HOME)/Documents/Coding/Husk/build/ios-arm64/sysroot)
-IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
-IB = build/ios
+IOS_CFLAGS = -std=c11 -Wall -Wextra $(IOS_OPT) $(IOS_LTO) -Icore -Ihost -Idevices -I$(IOS_DEPS)/include/slirp
+# Different optimisation means different objects: make would otherwise keep
+# -O2 objects around and link them into an -O3 build.
+IOS_DBG = $(if $(filter 0,$(DEBUG)),-rel,)
+IB = build/ios$(IOS_SFX)$(IOS_DBG)
+# The one place that knows where the engine lands. package_ipa.sh and the per-core
+# workflow ask for it here instead of hard-coding the directory name.
+print-ib:
+	@printf '%s\n' $(IB)
 # host/vm.c, dns_proxy.c and usb_host.c went away with the Windows direction;
 # the Windows runner is host/winvm.c, and the iOS front end for it is
 # ios/Henge/Native/henge-winvm.c (compiled by Xcode, next to the Swift sources).

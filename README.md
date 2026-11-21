@@ -1,101 +1,219 @@
 <p align="center">
-  <img src="docs/icon.png" width="120" height="120" alt="Henge">
+  <img src="docs/icon-halowin.png" width="120" height="120" alt="HaloWin">
 </p>
 
-<h1 align="center">Henge</h1>
+<h1 align="center">HaloWin</h1>
 
-<p align="center">macOS on your iPhone and iPad.</p>
+<p align="center">Windows 11 ARM64 on an iPad — no hypervisor, no Mac.</p>
 
 <p align="center">
-  <a href="#install">Install</a>
+  <a href="#getting-a-build">Getting a build</a>
   ·
   <a href="docs/architecture.md">How it works</a>
   ·
-  <a href="https://itslevii.dev">Website</a>
+  <a href="../../releases/latest">Releases</a>
   ·
-  <a href="https://github.com/Leviidev/Henge/releases">Releases</a>
+  <a href="docs/licensing.md">Licence</a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/Leviidev/Henge/releases"><img src="https://img.shields.io/github/downloads/Leviidev/Henge/total?style=flat-square&color=2E6BFF&labelColor=111111" alt="Downloads"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Leviidev/Henge?style=flat-square&color=2E6BFF&labelColor=111111" alt="GPL-2.0-or-later"></a>
-</p>
+A jack-o'-lantern in a four-pane window: Halloween and Windows in one mark.
 
-Download macOS, install it on the device, and use it.
+HaloWin is an arm64 virtual machine that lives inside an iOS app — its own JIT,
+its own MMU, its own devices, its own UEFI firmware. The guest is Windows 11
+ARM64. iOS gives apps no hypervisor, so none is used: the guest's code is
+translated and run on the device's own cores.
 
-- **Own emulator** — iOS gives apps no hypervisor, so Henge runs the Mac's arm64 code through its own JIT, with its own MMU and devices. It doesn't use QEMU or Virtualization.framework.
-- **Installs on the device** — Henge downloads Apple's restore image and restores it the way a Mac does. No Mac needed, and nothing is decrypted or patched.
-- **Graphics** — macOS draws through a virtual GPU, and Henge replays its commands with Metal. Safari and Electron apps like Discord draw on it.
-- **Touch** — The screen is a Magic Trackpad 2: two fingers to scroll, and the Mac's own gestures work on it — three-finger swipes for Spaces and Mission Control and more. The volume buttons are its buttons: up clicks, down right-clicks, hold to drag. Esc, Tab, Control, Option and Command sit above the keyboard.
-- **Keyboard and mouse** — On iPad, a Magic Keyboard or a Bluetooth keyboard and mouse drive the Mac directly.
-- **External display** — During a Mac session, connect a display with a video-capable USB-C cable or a USB-C/HDMI dock. The mode activates automatically: the monitor shows the Mac, while the iPhone or iPad keeps its trackpad and keyboard controls. Disconnect to return the image to the device. The existing guest resolution is preserved. On iOS 17–26 the same happens through an older iOS route, not yet tried on hardware; outside a Mac session the display mirrors the device. USB-C video is user-confirmed on an iPhone 17 Pro running iOS 27 (development build 0.1/2).
-- **Sharing** — Copy and paste between macOS and the device, and a shared folder that shows up in Files and on the Mac.
-- **Fits the screen** — On iPad, a new Mac gets a screen the shape of the iPad's, so there are no black bars.
+> **Status: not usable yet.** The firmware boots, `bootmgfw.efi` runs and hands
+> over to `winload`, and the loader gets far enough to build its own page tables
+> — then it stops on a memory access the emulated MMU rejects. That fault is what
+> this tree is currently chasing. There is no Windows desktop to look at yet.
 
-On an iPhone 17 Pro, macOS reaches the lock screen in about 15 seconds. Discord installs, opens in about 15 seconds, logs in and sends messages.
+## What it is, and what it is not
 
-## Install
+HaloWin is a fork of an existing emulator, pointed at Windows instead of macOS.
+The upstream project is Henge by Leviidev and contributors (GPL-2.0-or-later),
+and its notices and licence are kept unchanged here. What changed in this fork:
 
-Sideload `Henge.ipa` from [Releases](https://github.com/Leviidev/Henge/releases) with SideStore or AltStore, or install `Henge.tipa` with TrollStore or TrollStore Lite. To get updates in SideStore or AltStore, add Henge's source, `https://raw.githubusercontent.com/Leviidev/Henge/main/repo.json`, or `https://itslevii.dev/repo.json` for all of Leviidev's apps. iOS or iPadOS 17 or later, on an A14 or M1 chip or newer. So far it's tested only on an iPhone 17 Pro: iPad support is new and hasn't run on a real iPad yet.
+- macOS is no longer a target. The guest is Windows 11 ARM64 only.
+- The MMU is 4 KB granularity rather than 16 KB. macOS wants 16 KB pages, Windows
+  wants 4 KB, and this fork pays the cost of the smaller TLB on purpose.
+- The machine presented is a small PC: one CPU, 6 GB of RAM, PCIe with MSI-X,
+  GICv3 with ITS, ACPI tables, `fw_cfg`, pflash firmware, virtio devices and an
+  xHCI controller.
+- The app is Windows-specific: one machine, one boot button, one console, and
+  diagnostics built for a boot that hangs.
 
-- **JIT** is required: StikDebug, TrollStore (which stops at iOS 17.0), TrollStore Lite (which needs a jailbreak), a jailbreak on its own, or the StikJIT helper built into Henge (iOS 26 or later).
-- **Storage:** about 43 GB free for macOS Sequoia. That's 17 GB for the download, which you can delete afterwards, and 26 GB for the Mac.
-- **Memory:** a Mac gets 4, 6 or 8 GB. Sign Henge with the increased memory limit entitlement if your certificate has it.
+The upstream name, logo, website and copy belong to the upstream project and are
+not used here. HaloWin is a separate project — **not affiliated with, sponsored
+by or endorsed by** the upstream authors, or by Apple, Microsoft or any other
+vendor whose software it runs.
 
-Then open the Install tab, pick macOS Sequoia 15.6.1, and keep Henge open with the device plugged in. Tahoe 26.6.2 and macOS 27.2 are offered too. Sonoma 14.6.1 and Ventura 13.6 are smaller downloads (14.1 and 12.3 GB) for devices short on storage: they install, set up, and run Safari on Henge's iPhone graphics path (tested on a Mac so far). Monterey isn't offered yet: it installs, but its desktop never appears.
+## Getting a build
 
-## Sharing with the Mac
+Builds come out of CI, not out of a Mac. Every push to `main` runs
+[`.github/workflows/build-henge.yml`](.github/workflows/build-henge.yml) on a
+GitHub-hosted macOS runner and publishes the result as release assets on the
+[`latest` release](../../releases/latest):
 
-Do this once for each Mac: open Terminal on the Mac, then in Henge open Details and tap **Type the Set Up Command**. Press Return on the Mac, and choose Allow when macOS asks about `henge-agent` and local networks. It needs the Mac's keyboard layout to be U.S.
+- **`HaloWin.ipa`** — unsigned / ad-hoc signed, for SideStore or AltStore, which
+  re-sign it with your certificate on install.
+- **`HaloWin.tipa`** — for TrollStore.
 
-Then a Henge folder in the Mac's home folder is the same folder as Files › Henge › Shared. What you copy on the Mac is copied on the device too, and the paste button pastes from the device into the Mac.
+Those assets are the IPA files themselves, not a zip containing an IPA: release
+assets are served as the file, while workflow artifacts always arrive
+compressed.
+
+A build tuned to one core is published separately, on the
+[`variants` release](../../releases/tag/variants), as `HaloWin-<core>.ipa` — for
+example `HaloWin-A18-M4.ipa`, since M4 is A18 silicon. Cores that share silicon
+share one build and one name: `A10X` (the A10 cores are A10X's too, and only
+A10X devices run iOS 17), `A12-A12X`, `A14-M1`, `A15-M2`, `A16-M3`, `A18-M4`.
+M5 is its own core and its own build. M6 and A20 Pro are newer than Xcode's clang
+knows, so they are built with an LLVM 24 nightly when one is pointed at.
+
+The workflow runs as one of two things: `only_m4`, the iPad this is developed
+on, or the whole list (`A10X`, `A11`, `A12-A12X`, `A13`, `A14-M1`, `A15-M2`,
+`A16-M3`, `A17Pro`, `A18-M4`, `A18Pro`, `A19`, `A19Pro`, `A20Pro`, `M5`, `M6`),
+fifteen builds. Each build's real flags land in `flags.csv` beside the IPAs, because
+a core flag the compiler does not know silently falls back to an architecture
+tier. The deployment floor is iOS 17: an A10-silicon build installs on A10X
+devices (iPad Pro 2nd gen), not on the iPhone 7 (15.8) or iPad 6 (16.7) that
+share those cores.
+
+On the device you need:
+
+- **JIT.** iOS will not run the generated code without it — StikDebug, TrollStore,
+  or a jailbreak. (The app used to ship its own debugger extension; it is gone,
+  as StikDebug covers the case on every supported iOS.)
+- iOS or iPadOS 17 or later, on an A14 or M1 chip or newer.
+- **RAM, as a slider and a box.** 256 MB up to whatever the machine itself has,
+  and there is no ceiling written into the app: a 3 GB iPad stops at 3 GB, while
+  PlayCover on a 512 GB Mac Studio offers 512 GB and a 2 TB or 6 TB cluster node
+  offers all of it. The notches are a ladder rather than a fixed step: 256, 384,
+  512, 768, then 1 GB hops to 10 GB, and from there the step doubles once it is
+  an eighth of the current size -- 2 GB to 16 GB, 4 GB to 32 GB, 8 GB to 64 GB,
+  16 GB to 128 GB, 32 GB to 256 GB, 64 GB to 512 GB, 128 GB to 1 TB, 256 GB to
+  2 TB. The slider snaps to the nearest notch; the box beside it takes any number
+  in megabytes (1145 is a real answer) and the handle parks on the nearest notch
+  to it.
+- Free storage for the Windows image you boot.
+- A signing certificate carrying the *increased memory limit* entitlement if you
+  have one; without it the guest RAM is file-backed and much slower.
+
+Then open the app, pick your image, and boot. It writes `henge.log` and
+`henge-native.log` into its Documents folder — read those first if the boot
+stalls.
+
+## Building it yourself
+
+```sh
+zsh ios/scripts/fetch_deps.sh
+zsh tools/build_ios_restore.sh
+make ios-lib                                    # engine, -O2 with line tables
+zsh ios/scripts/package_ipa.sh                  # HaloWin.ipa (ad-hoc signed)
+zsh ios/scripts/package_ipa.sh --trollstore     # HaloWin.tipa
+```
+
+**Debug or release build.** `DEBUG=1` is the default: `-O2` and line tables, which
+is what the addresses in `henge.log` are read against. `DEBUG=0` is the shipping
+build: `-O3` plus LTO across the engine, the C files Xcode compiles and the link.
+It moves the timing around and inlines across files, so it is not what the boot
+stalls are diagnosed on.
+
+```sh
+DEBUG=0 make ios-lib
+DEBUG=0 zsh ios/scripts/package_ipa.sh
+```
+
+Objects never get shared between the two: `DEBUG=0` builds into `build/ios-rel`
+(`build/ios-m4-rel` for a per-core build), and `make print-ib` prints the
+directory the current settings use.
+
+The engine also builds and tests on a Mac host, without an iOS device:
+
+```sh
+sh compat/build-and-test.sh
+```
+
+## Diagnostics
+
+A boot that hangs is the normal case here, so the emulator is built to be
+readable rather than mysterious:
+
+- **`henge.log`** — one timeline: PC samples with instruction counts, block and
+  TLB statistics, every fault the guest took, and every page-table walk that came
+  up short — level by level, read as physical memory.
+- **`stall-mem-<pc>.bin`** — when a CPU has not left one PC for five seconds, 40 MB
+  around it is written out: code, stack, and page tables. A page that cannot be
+  reached through the guest's current address space is read as physical memory
+  instead, because page tables are exactly the memory a broken address space does
+  not map.
+- **`stall-stack-<pc>.bin`** — the stack alone, plus the words on it that point
+  back into the code.
+- **`HV_STATS`, `HV_HZ`, `HV_FLUSH`, `HV_XHCI_TRACE`** — knobs read at launch.
+  `HV_XHCI_TRACE` is off unless you ask for it.
 
 ## Known limits
 
-- Signing in to an Apple Account inside macOS fails with a verification error.
-- Graphics are tested on macOS's own apps, Chrome, Firefox, VS Code and Discord. Other apps may draw wrongly.
-- On macOS Sonoma, the login screen after a start, the menu bar and a strip down the left edge draw green, and switching to a dynamic wallpaper (such as Sonoma) can stop the screen updating. On Ventura, the Calendar icon in the Dock is missing its date.
-- For the first few minutes after you log in, macOS is busy starting up in the background, so apps open more slowly.
-- Only one Mac can start per launch. Quit Henge and open it again to start another, and to start one again after restarting or shutting down macOS.
-- iPadOS keeps some keyboard shortcuts for itself, such as Command-Tab.
-- It's emulation, so it runs slower than a real Mac.
+- Windows does not reach a desktop. Boot currently ends in the loader.
+- One CPU. SMP is not implemented.
+- No audio, no camera, no USB passthrough, and no GPU acceleration beyond a
+  framebuffer.
+- It is emulation: the guest runs on translated code, not on the device's cores.
 
-## Screenshots
+## The projects this stands on
 
-<table>
-  <tr>
-    <td align="center" colspan="3"><img src="Screenshots/ipad.jpg" alt="Discord on an iPad"><br><sub>iPad</sub></td>
-  </tr>
-  <tr>
-    <td align="center" width="33%"><img src="Screenshots/macs.png" alt="Macs"><br><sub>Macs</sub></td>
-    <td align="center" width="33%"><img src="Screenshots/trackpad.png" alt="Trackpad"><br><sub>Trackpad</sub></td>
-    <td align="center" width="33%"><img src="Screenshots/install.png" alt="Install macOS"><br><sub>Install macOS</sub></td>
-  </tr>
-</table>
+HaloWin is possible because other people published their work. It is built on,
+derived from, or modelled on these projects, and this is the credit they are owed:
 
-<sub>Captured on a Mac: the app's own screens with sample data, at iPad and iPhone sizes, showing a frame from Henge's renderer.</sub>
+- **[Henge](https://github.com/Leviidev/Henge)** — the emulator this tree is a
+  fork of: JIT, MMU, devices, the iOS host layer. GPL-2.0-or-later. Its notices
+  and licence are kept as they were.
+- **[WindowsiOS](https://github.com/ammaarreshi/WindowsiOS)** — a Windows-targeted
+  fork of Henge by Ammaar Reshi, GPL-2.0. It is the same lineage as this tree, and
+  the Windows side of the boot — the firmware identity, the ACPI tables, the
+  machine description Windows is handed, and part of the Windows UI scaffolding —
+  follows what it established. The ACPI tables this build presents still name it.
+- **[UTM](https://github.com/utmapp/UTM)** — the iOS virtual-machine app, Apache-2.0.
+  Its on-screen keyboard accessory (the Esc/Ctrl/Option/Command row, the sticky-key
+  behaviour) is the model for HaloWin's Windows key bar; the style and interactions
+  are UTM's.
+- **[virglrenderer, UTM's `neptune` branch](https://github.com/utmapp/virglrenderer)**
+  — MIT. The 3D path, when it is wired up, is built around this renderer rather
+  than around a new one.
+- **[UTM's QEMU fork](https://github.com/utmapp/qemu)** — GPL-2.0. The virtio-gpu
+  device design, the ISO-as-bytes boot assumption and the Windows-on-ARM machine
+  layout are read from here and from upstream QEMU; see
+  [docs/licensing.md](docs/licensing.md) for the file-by-file list.
 
-## Building
+Being listed here is credit, not endorsement. None of these projects is
+affiliated with HaloWin, and none of them has reviewed or approved it.
 
-To use Henge, install the [latest release](https://github.com/Leviidev/Henge/releases). Every change lands on `main` as it's made, so `main` can be unfinished between releases.
+## Licence and credits
 
-On a Mac with Xcode 27 or later and `xcodegen`. Henge takes StikJIT, on-device pairing, libslirp and glib from a built [Husk](https://github.com/Leviidev/Husk) checkout at `~/Documents/Coding/Husk` (set `HUSK` to use another path):
+HaloWin is **GPL-2.0-or-later**, the same terms as upstream. The shipped binary is
+a combined GPL work — usbmuxd and code from Husk are compiled into it — so it
+cannot go on the App Store.
 
-```bash
-ios/scripts/fetch_deps.sh
-tools/build_ios_restore.sh
-make ios-lib
-ios/scripts/package_ipa.sh
-```
+- Upstream work: Henge, Copyright (C) the Henge authors (Leviidev and
+  contributors), GPL-2.0-or-later — [LICENSE](LICENSE).
+- Changes in this fork: Copyright (C) 2026 qibaoseven, GPL-2.0-or-later —
+  [LICENSE-qibaoseven](LICENSE-qibaoseven).
+- Component-by-component provenance — QEMU-derived device code,
+  libimobiledevice, libzip, Mbed TLS, StikJIT and the rest —
+  [docs/licensing.md](docs/licensing.md).
 
-That produces `~/Desktop/Henge.ipa`, and `package_ipa.sh --trollstore` writes `Henge.tipa`.
+Upstream's notices are untouched. Nothing in this fork narrows or replaces them.
+Windows, macOS, iPhone and iPad are trademarks of their owners; the project name,
+icon and text of HaloWin are its own.
 
-`make` builds the engine for the Mac, `build/hengevm`, and `make test` runs its tests.
+## Names inside the code
 
-## Licence
-
-GPL-2.0-or-later. Henge compiles in usbmuxd (GPLv2 or GPLv3) and code from Husk (GPL-2.0-or-later), so the shipped binary is a combined GPL work. It cannot go on the App Store. See [docs/licensing.md](docs/licensing.md).
-
-macOS and the Mac's boot ROM are Apple's and aren't part of Henge. Henge downloads both from Apple when you install.
-
-Modifications in this tree (`core/`, `devices/`, `host/`, `tests/`, `tools/`) are Copyright (C) 2026 **qibaoseven** and stay under GPL-2.0-or-later; the original copyright and licence above are unchanged. See [LICENSE-qibaoseven](LICENSE-qibaoseven).
+The project is HaloWin. The code still carries its upstream identifiers — the
+bundle id `com.henge.app`, the `henge` log prefix, the `henge-agent` helper, and
+build products named from them — because those are bound to code signing,
+reinstall paths and data already on devices. Renaming the bundle is a separate,
+riskier change than renaming the project; the published release assets already
+use the project's own name.
+</content>
+</file_path>

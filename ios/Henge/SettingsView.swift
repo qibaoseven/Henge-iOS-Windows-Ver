@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var jit = JITCoordinator.shared
-    @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
@@ -42,11 +41,6 @@ struct SettingsView: View {
                     Text(jit.method == .automatic ? jit.automaticDescription : "Henge uses \(jit.method.title).")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("Set up JIT") { jit.showSetup = true }
-                    Toggle("Turn on JIT when Henge opens", isOn: $jitAtLaunch)
-                    if jitAtLaunch {
-                        Text("Henge connects LocalDevVPN first when it is off, and comes back.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    }
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
                 }
                 .listRowBackground(Desk.card)
