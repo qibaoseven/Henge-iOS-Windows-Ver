@@ -19,6 +19,8 @@
 
 #include "audio_mac.h"
 #include "dispatch.h"
+#include "machine.h"
+#include "mmu.h"
 #include "net_slirp.h"
 #include "share.h"
 
@@ -90,6 +92,91 @@ static double sample_now(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/* Read guest memory the way the guest would, from the sampler thread: the page
+   tables it finds and the RAM behind them are only read. */
+static int guest_read(HvCpu *c, uint64_t va, void *buf, unsigned len, HvAccess acc) {
+    HvWalk w;
+    hv_mmu_walk(c, va, acc, c->el, &w);
+    if (w.fsc) return 0;
+    return hv_phys_read(c->m, w.pa, buf, len) == 0;
+}
+
+/* A word about one instruction, enough to read a loop off the log. */
+static const char *stall_note(uint32_t w, uint64_t va, char *b, size_t n) {
+    int64_t o;
+    if ((w & 0xfc000000u) == 0x14000000u) { /* B */
+        o = (int64_t)(w & 0x03ffffffu);
+        if (o & 0x02000000LL) o -= 0x04000000LL;
+        snprintf(b, n, "b %llx", (unsigned long long)(va + (uint64_t)(o * 4)));
+        return b;
+    }
+    if ((w & 0xfc000000u) == 0x94000000u) {
+        o = (int64_t)(w & 0x03ffffffu);
+        if (o & 0x02000000LL) o -= 0x04000000LL;
+        snprintf(b, n, "bl %llx", (unsigned long long)(va + (uint64_t)(o * 4)));
+        return b;
+    }
+    if ((w & 0xff000010u) == 0x54000000u) { /* B.cond */
+        o = (int64_t)((w >> 5) & 0x7ffffu);
+        if (o & 0x40000LL) o -= 0x80000LL;
+        snprintf(b, n, "b.%u %llx", (unsigned)(w & 0xf), (unsigned long long)(va + (uint64_t)(o * 4)));
+        return b;
+    }
+    if ((w & 0xfffffc1fu) == 0xd65f0000u) return "ret";
+    if ((w & 0xfe9f0000u) == 0xd61f0000u) return (w & 0x001f0000u) == 0x001f0000u ? "blr xN" : "br xN";
+    if ((w & 0x7e000000u) == 0x34000000u || (w & 0x7e000000u) == 0x36000000u) return "cbz/cbnz/tbz/tbnz";
+    if ((w & 0xffe0001fu) == 0xd503201fu) return "nop/hint";
+    return "";
+}
+
+/* The guest has not left one PC for five seconds: say where it is, what the
+   code there is, and what the addresses it holds point at. */
+static void stall_dump(HvCpu *c) {
+    uint64_t pc = c->pc;
+    c->stall_reported++;
+    fprintf(stderr, "\nwinvm: *** cpu %u has not left pc %llx el%u for %u s (ic %llu): the guest is waiting, not booting ***\n",
+            c->index, (unsigned long long)pc, c->el, (unsigned)c->stall_n, (unsigned long long)c->icount);
+    fprintf(stderr, "  daif %llx sctlr %llx ttbr0 %llx tcr %llx esr %llx far %llx\n",
+            (unsigned long long)c->daif, (unsigned long long)c->sctlr_el1, (unsigned long long)c->ttbr0_el1,
+            (unsigned long long)c->tcr_el1, (unsigned long long)c->esr_el1, (unsigned long long)c->far_el1);
+    fprintf(stderr, "  x0  %llx x1  %llx x2  %llx x3  %llx x4  %llx x5  %llx x6  %llx x7  %llx\n",
+            (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2],
+            (unsigned long long)c->x[3], (unsigned long long)c->x[4], (unsigned long long)c->x[5],
+            (unsigned long long)c->x[6], (unsigned long long)c->x[7]);
+    fprintf(stderr, "  x8  %llx x9  %llx x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx sp  %llx\n",
+            (unsigned long long)c->x[8], (unsigned long long)c->x[9], (unsigned long long)c->x[19],
+            (unsigned long long)c->x[20], (unsigned long long)c->x[21], (unsigned long long)c->x[29],
+            (unsigned long long)c->x[30], (unsigned long long)c->sp);
+    fprintf(stderr, "  elr %llx spsr %llx\n", (unsigned long long)c->elr_el1, (unsigned long long)c->spsr_el1);
+    {
+        char note[48];
+        uint64_t base = pc & ~0xfull;
+        for (int i = 0; i < 16; i++) {
+            uint64_t va = base + 4 * i;
+            uint32_t w = 0;
+            int ok = guest_read(c, va, &w, 4, HV_ACC_EXEC);
+            const char *sep = i % 4 == 3 ? "\n" : "  ";
+            if (i % 4 == 0) fprintf(stderr, "  ");
+            note[0] = 0;
+            if (ok) fprintf(stderr, "%llx: %08x %-14s%s", (unsigned long long)va, w,
+                           stall_note(w, va, note, sizeof note), sep);
+            else fprintf(stderr, "%llx: (unreadable)%s", (unsigned long long)va, sep);
+        }
+    }
+    { /* what it is polling: the words the registers point at */
+        for (int r = 0; r < 8; r++) {
+            uint64_t b = c->x[r], w0 = 0, w8 = 0, w16 = 0, w64 = 0;
+            if (!b) continue;
+            int o0 = guest_read(c, b, &w0, 8, HV_ACC_READ), o8 = guest_read(c, b + 8, &w8, 8, HV_ACC_READ);
+            int o16 = guest_read(c, b + 16, &w16, 8, HV_ACC_READ), o64 = guest_read(c, b + 64, &w64, 8, HV_ACC_READ);
+            if (!o0 && !o8 && !o16 && !o64) continue;
+            fprintf(stderr, "  [x%d] %llx: %llx %llx %llx ... %llx\n", r, (unsigned long long)b,
+                    o0 ? (unsigned long long)w0 : 0ull, o8 ? (unsigned long long)w8 : 0ull,
+                    o16 ? (unsigned long long)w16 : 0ull, o64 ? (unsigned long long)w64 : 0ull);
+        }
+    }
+}
+
 static void sample_cpu_pcs(void) {
     double now = sample_now();
     if (sample_t0 == 0.0) sample_t0 = now;
@@ -112,13 +199,40 @@ static void sample_cpu_pcs(void) {
                 exit_reason_name((int)c->exit_reason), (unsigned)c->exit_reason, (int)c->halted,
                 (unsigned long long)c->daif, (unsigned long long)c->x[0], (unsigned long long)c->x[1],
                 (unsigned long long)c->sp);
+        /* Five samples with the same PC is a wait, not a boot: dump what it
+           waits on while it is still standing there. WFI is a real idle. */
+        if (c->pc == c->stall_pc) {
+            if (++c->stall_n >= 5 && c->stall_reported < 4 && c->exit_reason != HV_EXIT_WFI && !c->halted)
+                stall_dump(c);
+        } else {
+            c->stall_pc = c->pc;
+            c->stall_n = 0;
+            c->stall_reported = 0;
+        }
     }
-    if ((m.stats.blocks | 0x3ffu) == m.stats.blocks || m.stats.blocks < 1024)
-        fprintf(stderr, "winvm: [stats] %.1fs blocks=%llu chained=%llu tr=%llu flush_full=%llu"
-                        " protects=%llu fr_fail=%llu\n",
-                now - sample_t0, (unsigned long long)m.stats.blocks, (unsigned long long)m.stats.chained,
-                (unsigned long long)m.stats.translations, (unsigned long long)m.stats.flush_full,
-                (unsigned long long)m.stats.code_protects, (unsigned long long)m.stats.fr_fail[0]);
+    /* Every second, not when a counter happens to land on a round number:
+       a stall advances 400 blocks/s, and a sample that has to hit a multiple
+       of 1024 never comes. The +n after each counter is this second's work,
+       which is the only way to tell "nothing happened" from "nothing counted". */
+    {
+        static uint64_t b0, c0, t0s, f0, s0, p0, ff0;
+        fprintf(stderr, "winvm: [stats] %.1fs blocks=%llu(+%llu) chained=%llu(+%llu) tr=%llu(+%llu)"
+                        " flush_full=%llu(+%llu) syncs=%llu(+%llu) protects=%llu(+%llu) fr_fail=%llu(+%llu)\n",
+                now - sample_t0, (unsigned long long)m.stats.blocks, (unsigned long long)(m.stats.blocks - b0),
+                (unsigned long long)m.stats.chained, (unsigned long long)(m.stats.chained - c0),
+                (unsigned long long)m.stats.translations, (unsigned long long)(m.stats.translations - t0s),
+                (unsigned long long)m.stats.flush_full, (unsigned long long)(m.stats.flush_full - f0),
+                (unsigned long long)m.stats.syncs, (unsigned long long)(m.stats.syncs - s0),
+                (unsigned long long)m.stats.code_protects, (unsigned long long)(m.stats.code_protects - p0),
+                (unsigned long long)m.stats.fr_fail[0], (unsigned long long)(m.stats.fr_fail[0] - ff0));
+        b0 = m.stats.blocks;
+        c0 = m.stats.chained;
+        t0s = m.stats.translations;
+        f0 = m.stats.flush_full;
+        s0 = m.stats.syncs;
+        p0 = m.stats.code_protects;
+        ff0 = m.stats.fr_fail[0];
+    }
     sample_blocks = m.stats.blocks;
     sample_chained = m.stats.chained;
 }
@@ -379,7 +493,7 @@ int hv_winvm_run_cpu0(void) {
         hv_winvm_flush_disks();
         /* PSCI SYSTEM_RESET sets halted == 2: perform warm reboot without tearing down RAM/JIT! */
         if (cpus[0].halted == 2 && !atomic_load(&stop_requested)) {
-            fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
+            fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET - rebooting...\n");
             join_secondaries();
             /* Reset GIC, ITS, PCIe, and pflash state for warm reboot */
             if (board.gic) {
