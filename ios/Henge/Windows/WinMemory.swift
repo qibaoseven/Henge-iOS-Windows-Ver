@@ -1,5 +1,4 @@
 import Foundation
-import SwiftUI
 
 /// How much RAM the guest gets: a slider whose notches are a ladder rather than
 /// a fixed step, and a box beside it that takes any number at all.
@@ -43,8 +42,11 @@ enum WinMemory {
     }
 
     /// The notches, up to whatever this device has. Every value is megabytes.
-    static func stops() -> [Int] {
-        let cap = ceilingMB
+    static func stops() -> [Int] { stops(upTo: ceilingMB) }
+
+    /// The ladder for a machine with `cap` megabytes, so it can be tested
+    /// without being on the machine in question.
+    static func stops(upTo cap: Int) -> [Int] {
         // Everything up to 16 GB is written out by hand, because the values that
         // matter are not evenly spaced and a generated list would lose them:
         // 256 MB is the Tiny11 floor, 1536 MB is a small full install, 5120 MB is
@@ -78,12 +80,15 @@ enum WinMemory {
     /// floats, so the handle never claims a size the guest does not have -- a
     /// typed 1145 MB parks the handle on 1024 while the box keeps 1145.
     static func nearestIndex(of mb: Int, in stops: [Int]) -> Double {
-        guard !stops.isEmpty else { return 0 }
-        let clamped = snapped(mb)
+        guard let low = stops.first, let high = stops.last, !stops.isEmpty else { return 0 }
+        // Held inside the ladder it is given, not inside this device's ceiling: a
+        // ladder and a machine are two different things, and a test (or a saved
+        // machine from a bigger device) may bring its own ladder.
+        let target = min(max(mb, low), high)
         var best = 0
         var bestDistance = Int.max
         for (i, stop) in stops.enumerated() {
-            let d = abs(stop - clamped)
+            let d = abs(stop - target)
             if d < bestDistance { bestDistance = d; best = i }
         }
         return Double(best)
@@ -107,55 +112,5 @@ enum WinMemory {
             return "用了这台设备一半以上的内存：切回别的 app 时 Henge 有被系统关掉的风险。"
         }
         return nil
-    }
-}
-
-/// The memory row: the number on the left, the ladder on the slider, a box on the
-/// right for any number the ladder does not land on (1145 MB is a real answer).
-struct WinMemoryControl: View {
-    @Binding var mb: Int
-
-    private var stops: [Int] { WinMemory.stops() }
-
-    /// The slider runs over notch indices, so dragging lands on notches and the
-    /// handle snaps to the nearest one; a typed value parks it there while the
-    /// box keeps the exact number.
-    private var indexBinding: Binding<Double> {
-        Binding(
-            get: { WinMemory.nearestIndex(of: mb, in: stops) },
-            set: { value in
-                let i = min(max(Int(value.rounded()), 0), max(stops.count - 1, 0))
-                if stops.indices.contains(i) { mb = stops[i] }
-            }
-        )
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Text(WinMemory.label(mb))
-                    .monospacedDigit()
-                    .font(.callout.weight(.medium))
-                Slider(value: indexBinding, in: 0...Double(max(stops.count - 1, 1)))
-                // The box takes megabytes: it is the same unit the engine and the
-                // slider are in, so 1145 means 1145.
-                TextField("MB", value: $mb, format: .number)
-                    .multilineTextAlignment(.trailing)
-                    .keyboardType(.numberPad)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 88)
-                    .onSubmit { mb = WinMemory.snapped(mb) }
-            }
-            HStack {
-                Text(WinMemory.label(WinMemory.floorMB))
-                Spacer()
-                Text(WinMemory.label(WinMemory.ceilingMB))
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            if let note = WinMemory.note(mb) {
-                Text(note).font(.footnote).foregroundStyle(.secondary)
-            }
-        }
     }
 }

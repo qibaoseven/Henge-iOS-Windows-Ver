@@ -129,6 +129,16 @@ Objects never get shared between the two: `DEBUG=0` builds into `build/ios-rel`
 (`build/ios-m4-rel` for a per-core build), and `make print-ib` prints the
 directory the current settings use.
 
+The Swift side can be checked without a device or a full Xcode: parsing every
+source file needs only a Swift compiler (`swiftc -parse`), and the memory ladder
+has real tests, because `WinMemory` is Foundation-only and lives apart from its
+view.
+
+```sh
+sh tools/test-swift.sh                              # swiftc from PATH
+SWIFTC=/opt/swift-6.0.3/usr/bin/swiftc sh tools/test-swift.sh
+```
+
 The engine also builds and tests on a Mac host, without an iOS device:
 
 ```sh
