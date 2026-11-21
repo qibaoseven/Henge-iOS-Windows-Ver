@@ -26,6 +26,10 @@ final class WinEngine: ObservableObject {
     /// FirstLogonCommands finds the same disc later to install the drivers, so
     /// nothing has to be swapped mid-install.
     private func media(for m: WinMachine) -> (String?, String?, String?) {
+        // Skip mode: the disk was prepared somewhere else and boots on its own.
+        // Not a single disc goes in -- a stray PE or payload disc would only
+        // give the firmware a second boot path to pick by accident.
+        if m.bootMode == 1 { return (nil, nil, nil) }
         let drivers = FileManager.default.fileExists(atPath: m.driverISOPath) ? m.driverISOPath : nil
         switch m.stage {
         case 0, 1:
@@ -42,13 +46,20 @@ final class WinEngine: ObservableObject {
         errorText = nil
 
         let media = media(for: m)
-        if m.stage <= 1 && !m.peISOExists {
-            errorText = "还没导入 PE 光盘。到设置页导入 ARM64 的 PE ISO。"
-            return
-        }
-        if m.stage <= 1 && !m.payloadISOExists {
-            errorText = "还没导入数据光盘。到设置页导入装着 install.wim 或 ESD 的 ISO。"
-            return
+        if m.bootMode == 1 {
+            if !m.diskExists {
+                errorText = "跳过安装模式需要一块已经准备好的磁盘：到设置页“手动装载磁盘镜像”选一个 raw 镜像。"
+                return
+            }
+        } else {
+            if m.stage <= 1 && !m.peISOExists {
+                errorText = "还没导入 PE 光盘。到设置页导入 ARM64 的 PE ISO。"
+                return
+            }
+            if m.stage <= 1 && !m.payloadISOExists {
+                errorText = "还没导入数据光盘。到设置页导入装着 install.wim 或 ESD 的 ISO。"
+                return
+            }
         }
 
         // Which display hardware this machine gets, and how big it should think
