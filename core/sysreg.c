@@ -199,3 +199,6 @@ static int read_reg(HvCpu *cpu, uint32_t reg, uint64_t *v) {
     }
     return -1;
 }
+
+static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
+    HvMachine *m = cpu->m;
