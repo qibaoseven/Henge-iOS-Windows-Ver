@@ -118,7 +118,33 @@ void hv_raise_undef(HvCpu *cpu, uint64_t pc) {
    read as physical memory. A guest that faults on a mapping it believes in is
    either looking at a table we are not (wrong TTBR, wrong base) or one where
    that entry was never written; which level comes up empty says which. */
-static void walk_note(HvCpu *cpu, uint64_t va) {
+/* What is actually filled in, in the table that came up short: the runs of
+   populated entries, read as physical memory. "one page" (a run right next to
+   the miss), "a range starting one page late", and "nothing at all in a table
+   that exists" are three different bugs, and they read differently here. */
+static void table_runs(HvCpu *cpu, uint64_t tbl, int lvl, uint64_t miss) {
+    int total = 0, runs = 0;
+    for (int i = 0; i < 512; i++) {
+        uint64_t d = 0;
+        if (hv_phys_read(cpu->m, tbl + (uint64_t)i * 8, &d, 8) == 0 && d) total++;
+    }
+    fprintf(stderr, "    L%d table @%llx: %d/512 entries, miss [%u]%s", lvl, (unsigned long long)tbl,
+            total, (unsigned)miss, "  runs:");
+    int i = 0;
+    while (i < 512 && runs < 8) {
+        uint64_t d = 0;
+        while (i < 512 && (hv_phys_read(cpu->m, tbl + (uint64_t)i * 8, &d, 8) != 0 || !d)) i++;
+        if (i >= 512) break;
+        int s = i;
+        while (i < 512 && hv_phys_read(cpu->m, tbl + (uint64_t)i * 8, &d, 8) == 0 && d) i++;
+        fprintf(stderr, " [%d..%d]", s, i - 1);
+        runs++;
+    }
+    if (runs == 8) fprintf(stderr, " ...");
+    fprintf(stderr, "\n");
+}
+
+static void walk_note(HvCpu *cpu, uint64_t va, int listing) {
     uint64_t tcr = cpu->tcr_el1;
     int hi = (va >> 55) & 1;
     uint32_t tg = hi ? (tcr >> 30) & 3 : (tcr >> 14) & 3;
@@ -129,6 +155,8 @@ static void walk_note(HvCpu *cpu, uint64_t va) {
     int inputsize = 64 - (int)tsz, stride = g - 3;
     int levels = (inputsize - g + stride - 1) / stride, level = 4 - levels;
     uint64_t base = (hi ? cpu->ttbr1_el1 : cpu->ttbr0_el1) & 0x0000ffffffffffffull & ~1ull;
+    uint64_t tbl = 0;
+    int lvl = -1;
     fprintf(stderr, "  walk %llx: ttbr%d %llx tsz %u gran %d levels %d\n", (unsigned long long)va, hi,
             (unsigned long long)base, (unsigned)tsz, g, levels);
     for (; level <= 3; level++) {
@@ -138,12 +166,17 @@ static void walk_note(HvCpu *cpu, uint64_t va) {
         if (hv_phys_read(cpu->m, base + idx * 8, &desc, 8) != 0) {
             fprintf(stderr, "    L%d[%u] @%llx = no ram there\n", level, (unsigned)idx,
                     (unsigned long long)(base + idx * 8));
+            if (listing) table_runs(cpu, base, level, idx);
             return;
         }
         fprintf(stderr, "    L%d[%u] @%llx = %016llx%s%s\n", level, (unsigned)idx,
                 (unsigned long long)(base + idx * 8), (unsigned long long)desc,
                 (desc & 1) ? "" : "  <- invalid", (desc & 2) ? " table" : "");
-        if (!(desc & 1) || !(desc & 2)) return;
+        if (!(desc & 1) || !(desc & 2)) {
+            if (listing && lvl >= 0) table_runs(cpu, base, level, idx);
+            return;
+        }
+        tbl = base, lvl = level;
         base = desc & 0x0000fffffffff000ull;
     }
 }
@@ -158,8 +191,10 @@ void hv_raise_abort(HvCpu *cpu, int insn, uint64_t va, uint32_t fsc, int wnr, in
         walk_reported++;
         fprintf(stderr, "abort %s va %llx fsc %#x pc %llx el%u\n", insn ? "fetch" : (wnr ? "write" : "read"),
                 (unsigned long long)va, (unsigned)fsc, (unsigned long long)pc, cpu->el);
-        walk_note(cpu, va);
-        if (pc != va) walk_note(cpu, pc);
+        walk_note(cpu, va, 1);
+        if (pc != va) walk_note(cpu, pc, 1);
+        if (cpu->x[1] && cpu->x[1] != va) walk_note(cpu, cpu->x[1], 0);
+        if (cpu->x[0] && cpu->x[0] != va && cpu->x[0] != cpu->x[1]) walk_note(cpu, cpu->x[0], 0);
     }
     uint32_t ec = insn ? (cpu->el ? HV_EC_IABT_SAME : HV_EC_IABT_LOWER)
                        : (cpu->el ? HV_EC_DABT_SAME : HV_EC_DABT_LOWER);
