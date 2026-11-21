@@ -133,6 +133,8 @@ typedef struct HvCpu {
        another CPU's store in between makes it fail. */
 
     uint64_t ttbr0_el1;
+    uint64_t ttbr0_prev;   /* the root we were in before the last switch: an abort
+                              is worth reading in both address spaces */
     uint64_t ttbr1_el1;
     uint64_t mair_el1;
     uint64_t amair_el1;

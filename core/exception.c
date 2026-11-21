@@ -144,9 +144,13 @@ static void table_runs(HvCpu *cpu, uint64_t tbl, int lvl, uint64_t miss) {
     fprintf(stderr, "\n");
 }
 
-static void walk_note(HvCpu *cpu, uint64_t va, int listing) {
+static void walk_note_ttbr(HvCpu *cpu, uint64_t va, int listing, uint64_t root0) {
     uint64_t tcr = cpu->tcr_el1;
     int hi = (va >> 55) & 1;
+    if (hi && root0) {  /* the caller asked about the low half only */
+        fprintf(stderr, "  walk %llx: ttbr1 address, skipped\n", (unsigned long long)va);
+        return;
+    }
     uint32_t tg = hi ? (tcr >> 30) & 3 : (tcr >> 14) & 3;
     int g = hi ? (tg == 1 ? 14 : tg == 3 ? 16 : 12) : (tg == 2 ? 14 : tg == 1 ? 16 : 12);
     uint32_t tsz = hi ? (tcr >> 16) & 63 : tcr & 63;
@@ -154,9 +158,11 @@ static void walk_note(HvCpu *cpu, uint64_t va, int listing) {
     if (tsz > 39) tsz = 39;
     int inputsize = 64 - (int)tsz, stride = g - 3;
     int levels = (inputsize - g + stride - 1) / stride, level = 4 - levels;
-    uint64_t base = (hi ? cpu->ttbr1_el1 : cpu->ttbr0_el1) & 0x0000ffffffffffffull & ~1ull;
-    fprintf(stderr, "  walk %llx: ttbr%d %llx tsz %u gran %d levels %d\n", (unsigned long long)va, hi,
-            (unsigned long long)base, (unsigned)tsz, g, levels);
+    uint64_t base = (hi ? cpu->ttbr1_el1 : (root0 ? root0 : cpu->ttbr0_el1)) & 0x0000ffffffffffffull & ~1ull;
+    fprintf(stderr, "  walk %llx: ttbr%d %llx tsz %u gran %d levels %d%s\n", (unsigned long long)va, hi,
+            (unsigned long long)base, (unsigned)tsz, g, levels, root0 && !hi ? "  <- previous root" : "");
+    uint64_t parent = 0, parent_idx = 0;
+    int have_parent = 0;
     for (; level <= 3; level++) {
         int shift = g + stride * (3 - level);
         int idx_bits = level == 4 - levels ? inputsize - shift : stride;
@@ -174,12 +180,23 @@ static void walk_note(HvCpu *cpu, uint64_t va, int listing) {
             if (listing) {
                 table_runs(cpu, base, level, (int)idx);
                 hv_pte_report(cpu->m, base, idx);
+                /* When did this level's own slot get pointed at that table?
+                   A link written a moment ago means the table was born empty
+                   and nobody filled it afterwards. */
+                if (have_parent) {
+                    fprintf(stderr, "    parent L%d[%u] @%llx, its writes:\n", level - 1, (unsigned)parent_idx,
+                            (unsigned long long)(parent + parent_idx * 8));
+                    hv_pte_report(cpu->m, parent, parent_idx);
+                }
             }
             return;
         }
+        parent = base, parent_idx = idx, have_parent = 1;
         base = desc & 0x0000fffffffff000ull;
     }
 }
+
+static void walk_note(HvCpu *cpu, uint64_t va, int listing) { walk_note_ttbr(cpu, va, listing, 0); }
 
 void hv_raise_abort(HvCpu *cpu, int insn, uint64_t va, uint32_t fsc, int wnr, int s1ptw, uint64_t pc) {
     static int walk_reported, aborts_seen;
@@ -203,6 +220,14 @@ void hv_raise_abort(HvCpu *cpu, int insn, uint64_t va, uint32_t fsc, int wnr, in
         if (pc != va) walk_note(cpu, pc, 1);
         if (cpu->x[1] && cpu->x[1] != va) walk_note(cpu, cpu->x[1], 0);
         if (cpu->x[0] && cpu->x[0] != va && cpu->x[0] != cpu->x[1]) walk_note(cpu, cpu->x[0], 0);
+        /* The same address in the address space we were in before the last
+           switch: if the mapping is there and not here, the mapping is not
+           missing at all -- it belongs to a root this code is no longer running
+           under. */
+        if (cpu->ttbr0_prev && cpu->ttbr0_prev != cpu->ttbr0_el1 && !((va >> 55) & 1)) {
+            fprintf(stderr, "  same va, previous root %llx:\n", (unsigned long long)cpu->ttbr0_prev);
+            walk_note_ttbr(cpu, va, 1, cpu->ttbr0_prev);
+        }
         fprintf(stderr, "  state: elr %llx spsr %llx sp %llx x0 %llx x1 %llx x2 %llx"
                         " x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx\n",
                 (unsigned long long)cpu->elr_el1, (unsigned long long)cpu->spsr_el1, (unsigned long long)cpu->sp,

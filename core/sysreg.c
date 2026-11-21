@@ -246,6 +246,7 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
             /* Which address space the loader was in when it mapped or wrote
                something is half of why a mapping can be missing. */
             static int reported;
+            cpu->ttbr0_prev = old;
             cpu->ttbr0_changed_at = mach_absolute_time();
             if (cpu->m->log && reported < 64) {
                 reported++;

@@ -193,23 +193,28 @@ jobs:
         working-directory: Henge
         run: zsh ios/scripts/package_ipa.sh
 
-      - name: Upload Henge.ipa
-        uses: actions/upload-artifact@v4
-        with:
-          name: Henge-ipa-${{ github.sha }}
-          path: /Users/runner/Desktop/Henge.ipa
-          if-no-files-found: error
-
       - name: Package Henge.tipa
         working-directory: Henge
         run: zsh ios/scripts/package_ipa.sh --trollstore
 
-      - name: Upload Henge.tipa
-        uses: actions/upload-artifact@v4
-        with:
-          name: Henge-tipa-${{ github.sha }}
-          path: /Users/runner/Desktop/Henge.tipa
-          if-no-files-found: error
+      # Upload-artifact always hands the downloader a .zip, whatever the file
+      # inside is. Release assets are served as the file itself, so the IPA is
+      # published there and nothing else: one rolling release named "latest",
+      # recreated every build so the asset names stay Henge.ipa / Henge.tipa.
+      - name: Publish Henge.ipa and Henge.tipa (direct download, no zip)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd Henge
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest \
+            --target "${{ github.sha }}" \
+            --title "Henge build ${GITHUB_SHA:0:8}" \
+            --notes "Built from \`${GITHUB_SHA}\` (run ${GITHUB_RUN_ID}). Henge.ipa is unsigned/ad-hoc; Henge.tipa is the TrollStore build." \
+            --prerelease \
+            /Users/runner/Desktop/Henge.ipa \
+            /Users/runner/Desktop/Henge.tipa
 
       # Symbols for lldb: package_ipa.sh only makes the .ipa, so this is where
       # the Release build's .dSYM comes from.

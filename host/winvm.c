@@ -154,9 +154,14 @@ static int stall_ram_of(HvCpu *c, uint64_t va, uint64_t *start, uint64_t *end) {
 }
 
 /* Copy guest memory a page at a time: the window may span blocks of more than
-   one size, and a page that cannot be read is written as zeros and counted. */
+   one size, and a page that cannot be read is written as zeros and counted.
+   Reading it through the current address space is only half the job: page
+   tables themselves are physical memory that the address space in force may
+   have no mapping for, and they are exactly what a fault has to be read
+   against. So a page the walk cannot reach is read as physical memory (identity)
+   instead, and counted separately. */
 static void stall_copy(HvCpu *c, uint64_t va, uint8_t *buf, unsigned long len,
-                       unsigned long *bad) {
+                       unsigned long *bad, unsigned long *phys) {
     unsigned long done = 0;
     while (done < len) {
         unsigned long n = 4096ul - (unsigned long)((va + done) & 4095ul);
@@ -164,7 +169,13 @@ static void stall_copy(HvCpu *c, uint64_t va, uint8_t *buf, unsigned long len,
         if (n > len - done) n = len - done;
         hv_mmu_walk(c, va + done, HV_ACC_READ, c->el, &w);
         if (w.fsc) hv_mmu_walk(c, va + done, HV_ACC_EXEC, c->el, &w); /* code pages are often read-protected */
-        if (w.fsc || hv_phys_read(c->m, w.pa, buf + done, (unsigned)n) != 0) {
+        if (!w.fsc && hv_phys_read(c->m, w.pa, buf + done, (unsigned)n) == 0) {
+            done += n;
+            continue;
+        }
+        if (hv_phys_read(c->m, va + done, buf + done, (unsigned)n) == 0) {
+            if (phys) (*phys)++;
+        } else {
             memset(buf + done, 0, n);
             if (bad) (*bad)++;
         }
@@ -178,13 +189,14 @@ static char *stall_path(const char *what, uint64_t pc, char *out, size_t n) {
     return out;
 }
 
-static unsigned long long stall_write(HvCpu *c, FILE *f, uint64_t from, uint64_t len, unsigned long *bad) {
+static unsigned long long stall_write(HvCpu *c, FILE *f, uint64_t from, uint64_t len, unsigned long *bad,
+                                      unsigned long *phys) {
     uint8_t *buf = malloc(STALL_CHUNK);
     unsigned long long written = 0;
     if (!buf) return 0;
     for (uint64_t off = 0; off < len; off += STALL_CHUNK) {
         unsigned long n = (unsigned long)(len - off < STALL_CHUNK ? len - off : STALL_CHUNK);
-        stall_copy(c, from + off, buf, n, bad);
+        stall_copy(c, from + off, buf, n, bad, phys);
         fwrite(buf, 1, n, f);
         written += n;
     }
@@ -285,15 +297,15 @@ static void stall_dump(HvCpu *c) {
             }
             if (hi > lo + STALL_MAX) hi = lo + STALL_MAX;
             char path[256];
-            unsigned long bad = 0;
+            unsigned long bad = 0, phys = 0;
             FILE *f = fopen(stall_path("mem", pc, path, sizeof path), "wb");
             unsigned long long n = 0;
             if (f) {
-                n = stall_write(c, f, lo, hi - lo, &bad);
+                n = stall_write(c, f, lo, hi - lo, &bad, &phys);
                 fclose(f);
             }
-            fprintf(stderr, "  memory %llx..%llx (%llu KB, %lu unreadable pages) -> %s\n",
-                    (unsigned long long)lo, (unsigned long long)hi, n >> 10, bad, f ? path : "(open failed)");
+            fprintf(stderr, "  memory %llx..%llx (%llu KB, %lu unreadable pages, %lu read as physical) -> %s\n",
+                    (unsigned long long)lo, (unsigned long long)hi, n >> 10, bad, phys, f ? path : "(open failed)");
             /* the stack, read once: written out, and searched for call sites */
             uint64_t slo, shi;
             if (in_ram) {
@@ -305,18 +317,18 @@ static void stall_dump(HvCpu *c) {
                 shi = c->sp + STALL_STACK_UP;
             }
             if (shi > slo) {
-                unsigned long n2 = (unsigned long)(shi - slo), bad2 = 0;
+                unsigned long n2 = (unsigned long)(shi - slo), bad2 = 0, phys2 = 0;
                 uint8_t *sb = malloc(n2);
                 if (sb) {
                     FILE *g;
-                    stall_copy(c, slo, sb, n2, &bad2);
+                    stall_copy(c, slo, sb, n2, &bad2, &phys2);
                     g = fopen(stall_path("stack", pc, path, sizeof path), "wb");
                     if (g) {
                         fwrite(sb, 1, n2, g);
                         fclose(g);
                     }
-                    fprintf(stderr, "  stack %llx..%llx (%lu KB, %lu unreadable pages) -> %s\n",
-                            (unsigned long long)slo, (unsigned long long)shi, n2 >> 10, bad2,
+                    fprintf(stderr, "  stack %llx..%llx (%lu KB, %lu unreadable pages, %lu physical) -> %s\n",
+                            (unsigned long long)slo, (unsigned long long)shi, n2 >> 10, bad2, phys2,
                             g ? path : "(open failed)");
                     /* anything on the stack that points into the code window is a
                        return address or a saved argument: the call sites, without
