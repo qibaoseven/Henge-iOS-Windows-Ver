@@ -28,14 +28,12 @@ struct WinSettingsView: View {
             }
         )
     }
-    private let cpuChoices = [2, 4, 6, 8]
-
     var body: some View {
         NavigationStack {
             Form {
                 Section("JIT") {
-                    LabeledContent("状态", value: JITBootstrap.ready ? "就绪" : "未就绪")
-                    Button("设置 JIT…") { jit.showSetup = true }
+                    LabeledContent("状态", value: JITBootstrap.ready ? "就绠" : "未就绠")
+                    Button("设置 JIT…") { JITCoordinator.shared.showSetup = true }
                 }
 
                 Section("名字") {
@@ -46,8 +44,17 @@ struct WinSettingsView: View {
                     Picker("内存", selection: $machine.ramMB) {
                         ForEach(ramChoices, id: \.self) { Text("\($0 / 1024) GB").tag($0) }
                     }
-                    Picker("CPU", selection: $machine.cpus) {
-                        ForEach(cpuChoices, id: \.self) { Text("\($0) 核").tag($0) }
+                    /* A text field, not a picker: 1 core is the useful value here.
+                       A single vCPU is how you tell "the guest is waiting for
+                       another CPU that never runs" from "the guest is stuck in
+                       its own code", and the firmware runs fine on one. */
+                    LabeledContent("CPU") {
+                        TextField("1–8", value: $machine.cpus, format: .number)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .onChange(of: machine.cpus) { value in
+                                machine.cpus = min(max(value, 1), 8)
+                            }
                     }
                 }
                 .disabled(engine.running)
