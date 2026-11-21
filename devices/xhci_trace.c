@@ -29,12 +29,11 @@ static void trace_close_at_exit(void) {
     hv_xhci_trace_close();
 }
 
-/* The diagnostic session that found the missing bNumConfigurations wrote every
-   MMIO read and every poll tick: ~290k lines in a few minutes, which is the
-   level of detail we actually need when a guest misbehaves. Full logging is
-   therefore the default. HV_XHCI_TRACE_QUIET=1 drops only the highest-frequency
-   lines (bar_read / poll # / run_tray) when the file would grow too fast for a
-   long session. */
+/* Tracing is off unless HV_XHCI_TRACE is set (see hv_xhci_trace_init). When it
+   is on it writes every MMIO read and every poll tick: ~290k lines in a few
+   minutes, which is the level of detail we want when a guest misbehaves.
+   HV_XHCI_TRACE_QUIET=1 drops only the highest-frequency lines (bar_read /
+   poll # / run_tray) when the file would grow too fast for a long session. */
 static int trace_full(void) {
     static int on = -1;
     if (on < 0) on = getenv("HV_XHCI_TRACE_QUIET") == NULL;
@@ -50,6 +49,13 @@ static int trace_quiet_line(const char *fmt) {
 
 void hv_xhci_trace_init(void) {
     if (g_trace) return;
+
+    /* Off unless asked for. The USB bring-up that needed every MMIO read is
+       over (the guest loads from the CD and the keyboard/trackpad work), and
+       full tracing wrote ~290k lines in a few minutes into a file that sits
+       next to the log we are actually reading. HV_XHCI_TRACE=1 turns it back
+       on; HV_XHCI_TRACE_FILE still picks the path. */
+    if (!getenv("HV_XHCI_TRACE")) return;
 
     const char *env = getenv("HV_XHCI_TRACE_FILE");
     if (env && *env) {
