@@ -46,17 +46,12 @@ struct WinSettingsView: View {
                     Picker("内存", selection: $machine.ramMB) {
                         ForEach(ramChoices, id: \.self) { Text("\($0 / 1024) GB").tag($0) }
                     }
-                    /* A text field, not a picker: 1 core is the useful value here.
-                       A single vCPU is how you tell "the guest is waiting for
-                       another CPU that never runs" from "the guest is stuck in
-                       its own code", and the firmware runs fine on one. */
-                    LabeledContent("CPU") {
-                        TextField("1–8", value: $machine.cpus, format: .number)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .onChange(of: machine.cpus) { value in
-                                machine.cpus = min(max(value, 1), 8)
-                            }
+                    /* A stepper, not a text field: a TextField appends, so the
+                       old "6" plus a new "1" read as 61 and the clamp turned
+                       that into 8 -- any key appeared to produce 8. This walks
+                       the whole 1...8 range in taps and reaches a single core. */
+                    Stepper(value: $machine.cpus, in: 1...8) {
+                        LabeledContent("CPU", value: "\(machine.cpus) 核")
                     }
                 }
                 .disabled(engine.running)
