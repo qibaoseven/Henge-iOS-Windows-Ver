@@ -502,6 +502,11 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     m.log = c->log;
     m.stats_interval = c->stats_interval;
     if (getenv("HV_SLOW_MEM")) m.slow_mem = 1;
+    /* TEMPORARY (winload mapping hunt): force every load and store through
+       hv_mem_emulate so the PTE-write ring in core/machine.c sees the writes
+       the JIT would otherwise make straight to host memory. Slower boot; drop
+       this line once the missing mapping is explained. */
+    m.slow_mem = 1;
     ncpus = c->ncpus < 1 ? 1 : c->ncpus > HV_MAX_CPUS ? HV_MAX_CPUS : c->ncpus;
     m.big_lock_on = ncpus > 1 && getenv("HV_BIG_LOCK") != NULL;
 

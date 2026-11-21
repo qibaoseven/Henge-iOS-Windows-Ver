@@ -582,11 +582,76 @@ int hv_phys_read(HvMachine *m, uint64_t pa, void *buf, unsigned len) {
     return 0;
 }
 
+/* ---- what wrote the page tables -------------------------------------------
+   A guest that faults on an address it believes in is either looking at a
+   table we are not, or at one where that entry was never written. A PTE that
+   was never written and a PTE that was written and then cleared both read as
+   zero at fault time; keeping the last N descriptor-shaped writes, with the
+   guest PC that made each of them, tells them apart and names the code that
+   did it. Only 8-byte aligned writes whose low two bits are 11 (a valid table
+   or page descriptor) are kept, so ordinary data writes stay out of the ring. */
+#define HV_PTE_RING 2048
+typedef struct {
+    uint64_t seq, pc, pa, val;
+} HvPteWrite;
+static HvPteWrite g_pte[HV_PTE_RING];
+static uint64_t g_pte_seq, g_pte_writes;
+
+static void pte_ring_note(HvMachine *m, uint64_t pa, const void *buf, unsigned len) {
+    if (len != 8 || (pa & 7)) return;
+    uint64_t v;
+    memcpy(&v, buf, 8);
+    if ((v & 3) != 3) return;
+    g_pte_writes++;
+    HvPteWrite *e = &g_pte[g_pte_writes & (HV_PTE_RING - 1)];
+    e->seq = g_pte_writes, e->pc = m->access_pc, e->pa = pa, e->val = v;
+}
+
+/* Called where a walk came up short: the table page it stopped in, and the
+   entry it wanted. Prints the writes to that table page (the pattern of what
+   *is* filled in, and by which PC) and the last few descriptor writes anywhere. */
+void hv_pte_report(HvMachine *m, uint64_t tbl, uint64_t idx) {
+    uint64_t slot = tbl + idx * 8;
+    uint64_t first = g_pte_writes < HV_PTE_RING ? 1 : g_pte_writes - HV_PTE_RING + 1;
+    int page_writes = 0, seen = 0, last_global = 0;
+    fprintf(stderr, "    pte: %llu descriptor writes this boot; table %llx wants entry [%u] @%llx\n",
+            (unsigned long long)g_pte_writes, (unsigned long long)tbl, (unsigned)idx, (unsigned long long)slot);
+    for (uint64_t s = first; s <= g_pte_writes; s++) {
+        HvPteWrite *e = &g_pte[s & (HV_PTE_RING - 1)];
+        if (e->seq != s) continue;
+        if (e->pa - tbl < 4096) {
+            page_writes++;
+            if (seen < 24) {
+                seen++;
+                fprintf(stderr, "      seq %llu idx %llu pc %llx @%llx = %016llx%s\n", (unsigned long long)e->seq,
+                        (unsigned long long)((e->pa - tbl) / 8), (unsigned long long)e->pc,
+                        (unsigned long long)e->pa, (unsigned long long)e->val,
+                        e->pa == slot ? "  <- this entry" : "");
+            } else if (e->pa == slot) {
+                fprintf(stderr, "      seq %llu idx %llu pc %llx @%llx = %016llx  <- this entry\n",
+                        (unsigned long long)e->seq, (unsigned long long)((e->pa - tbl) / 8),
+                        (unsigned long long)e->pc, (unsigned long long)e->pa, (unsigned long long)e->val);
+            }
+        }
+    }
+    if (!page_writes)
+        fprintf(stderr, "      (no descriptor write ever landed in that 4 KB table page)\n");
+    else
+        fprintf(stderr, "      (%d writes in that page, %d shown)\n", page_writes, seen < 24 ? seen : 24);
+    for (uint64_t s = first; s <= g_pte_writes && last_global < 8; s++) {
+        HvPteWrite *e = &g_pte[s & (HV_PTE_RING - 1)];
+        if (e->seq != s || s + 8 > g_pte_writes) continue;
+        last_global++;
+        fprintf(stderr, "      last: seq %llu pc %llx @%llx = %016llx\n", (unsigned long long)e->seq,
+                (unsigned long long)e->pc, (unsigned long long)e->pa, (unsigned long long)e->val);
+    }
+}
+
 int hv_phys_write(HvMachine *m, uint64_t pa, const void *buf, unsigned len) {
     HvRam *r = hv_ram_lookup(m, pa);
-    if (r && pa + len - r->pa <= r->size) {
-        if (r->readonly) return 0; /* ROM: writes are ignored */
+    if (r && pa + len - r->pa <= r->size) {        if (r->readonly) return 0; /* ROM: writes are ignored */
         uint64_t off = pa - r->pa;
+        pte_ring_note(m, pa, buf, len);
         uint64_t first = off >> HV_TLB_PAGE_BITS, last = (off + len - 1) >> HV_TLB_PAGE_BITS;
         for (uint64_t pg = first; pg <= last; pg++)
             if (r->code_pages[pg]) hv_invalidate_code(m, r->pa + (pg << HV_TLB_PAGE_BITS)); /* a write to code */

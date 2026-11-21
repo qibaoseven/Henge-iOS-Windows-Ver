@@ -155,8 +155,6 @@ static void walk_note(HvCpu *cpu, uint64_t va, int listing) {
     int inputsize = 64 - (int)tsz, stride = g - 3;
     int levels = (inputsize - g + stride - 1) / stride, level = 4 - levels;
     uint64_t base = (hi ? cpu->ttbr1_el1 : cpu->ttbr0_el1) & 0x0000ffffffffffffull & ~1ull;
-    uint64_t tbl = 0;
-    int lvl = -1;
     fprintf(stderr, "  walk %llx: ttbr%d %llx tsz %u gran %d levels %d\n", (unsigned long long)va, hi,
             (unsigned long long)base, (unsigned)tsz, g, levels);
     for (; level <= 3; level++) {
@@ -173,28 +171,44 @@ static void walk_note(HvCpu *cpu, uint64_t va, int listing) {
                 (unsigned long long)(base + idx * 8), (unsigned long long)desc,
                 (desc & 1) ? "" : "  <- invalid", (desc & 2) ? " table" : "");
         if (!(desc & 1) || !(desc & 2)) {
-            if (listing && lvl >= 0) table_runs(cpu, base, level, idx);
+            if (listing) {
+                table_runs(cpu, base, level, (int)idx);
+                hv_pte_report(cpu->m, base, idx);
+            }
             return;
         }
-        tbl = base, lvl = level;
         base = desc & 0x0000fffffffff000ull;
     }
 }
 
 void hv_raise_abort(HvCpu *cpu, int insn, uint64_t va, uint32_t fsc, int wnr, int s1ptw, uint64_t pc) {
-    static int walk_reported;
-    /* The first few translation/permission faults of a boot, with the tables the
-       guest is looking at. Only eight, and not the ones that fault on a table
-       walk itself (s1ptw), so a boot that faults once per second stays readable. */
-    if (!s1ptw && cpu->m->log && walk_reported < 8 &&
+    static int walk_reported, aborts_seen;
+    /* Every abort gets one line (the first 200): a fault the guest survived is
+       still part of the story of the one it did not. The first four, and only
+       translation/permission faults, also get the tables and the PTE history:
+       not the ones that fault on a table walk itself (s1ptw), which say nothing
+       about the mapping that is missing. */
+    if (cpu->m->log && aborts_seen < 200) {
+        aborts_seen++;
+        fprintf(stderr, "abort#%d %s va %llx fsc %#x pc %llx el%u%s\n", aborts_seen,
+                insn ? "fetch" : (wnr ? "write" : "read"), (unsigned long long)va, (unsigned)fsc,
+                (unsigned long long)pc, cpu->el, s1ptw ? " (table walk)" : "");
+    }
+    if (!s1ptw && cpu->m->log && walk_reported < 4 &&
         ((fsc & 0x3c) == 0x04 || (fsc & 0x3c) == 0x0c)) {
         walk_reported++;
-        fprintf(stderr, "abort %s va %llx fsc %#x pc %llx el%u\n", insn ? "fetch" : (wnr ? "write" : "read"),
+        fprintf(stderr, "abort detail %s va %llx fsc %#x pc %llx el%u\n", insn ? "fetch" : (wnr ? "write" : "read"),
                 (unsigned long long)va, (unsigned)fsc, (unsigned long long)pc, cpu->el);
         walk_note(cpu, va, 1);
         if (pc != va) walk_note(cpu, pc, 1);
         if (cpu->x[1] && cpu->x[1] != va) walk_note(cpu, cpu->x[1], 0);
         if (cpu->x[0] && cpu->x[0] != va && cpu->x[0] != cpu->x[1]) walk_note(cpu, cpu->x[0], 0);
+        fprintf(stderr, "  state: elr %llx spsr %llx sp %llx x0 %llx x1 %llx x2 %llx"
+                        " x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx\n",
+                (unsigned long long)cpu->elr_el1, (unsigned long long)cpu->spsr_el1, (unsigned long long)cpu->sp,
+                (unsigned long long)cpu->x[0], (unsigned long long)cpu->x[1], (unsigned long long)cpu->x[2],
+                (unsigned long long)cpu->x[19], (unsigned long long)cpu->x[20], (unsigned long long)cpu->x[21],
+                (unsigned long long)cpu->x[29], (unsigned long long)cpu->x[30]);
     }
     uint32_t ec = insn ? (cpu->el ? HV_EC_IABT_SAME : HV_EC_IABT_LOWER)
                        : (cpu->el ? HV_EC_DABT_SAME : HV_EC_DABT_LOWER);

@@ -242,7 +242,17 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
     case R(3, 0, 2, 0, 0): { /* a process switch */
         uint64_t old = cpu->ttbr0_el1;
         cpu->ttbr0_el1 = v;
-        if (old != v) cpu->ttbr0_changed_at = mach_absolute_time();
+        if (old != v) {
+            /* Which address space the loader was in when it mapped or wrote
+               something is half of why a mapping can be missing. */
+            static int reported;
+            cpu->ttbr0_changed_at = mach_absolute_time();
+            if (cpu->m->log && reported < 64) {
+                reported++;
+                fprintf(stderr, "ttbr0: %llx -> %llx (ic %llu el%u)\n", (unsigned long long)old,
+                        (unsigned long long)v, (unsigned long long)cpu->icount, cpu->el);
+            }
+        }
         hv_tlb_switch_user(cpu, old, v);
         hv_ijc_switch(cpu);
         return 0;

@@ -335,6 +335,8 @@ void *hv_phys_ptr(HvMachine *m, uint64_t pa, uint64_t len);
 /* Physical accesses from C (page-table walks, devices doing DMA, slow paths). */
 int hv_phys_read(HvMachine *m, uint64_t pa, void *buf, unsigned len);
 int hv_phys_write(HvMachine *m, uint64_t pa, const void *buf, unsigned len);
+/* Diagnostics: the writes that landed in a page-table page, and who made them. */
+void hv_pte_report(HvMachine *m, uint64_t tbl, uint64_t idx);
 
 void hv_cpu_reset(HvCpu *cpu, HvMachine *m); /* CPU 0 */
 void hv_cpu_reset_index(HvCpu *cpu, HvMachine *m, uint32_t index);
