@@ -114,7 +114,53 @@ void hv_raise_undef(HvCpu *cpu, uint64_t pc) {
     hv_raise_sync(cpu, HV_EC_UNKNOWN, 0, 0, pc);
 }
 
+/* The page tables behind an address that just faulted, printed level by level,
+   read as physical memory. A guest that faults on a mapping it believes in is
+   either looking at a table we are not (wrong TTBR, wrong base) or one where
+   that entry was never written; which level comes up empty says which. */
+static void walk_note(HvCpu *cpu, uint64_t va) {
+    uint64_t tcr = cpu->tcr_el1;
+    int hi = (va >> 55) & 1;
+    uint32_t tg = hi ? (tcr >> 30) & 3 : (tcr >> 14) & 3;
+    int g = hi ? (tg == 1 ? 14 : tg == 3 ? 16 : 12) : (tg == 2 ? 14 : tg == 1 ? 16 : 12);
+    uint32_t tsz = hi ? (tcr >> 16) & 63 : tcr & 63;
+    if (tsz < 16) tsz = 16;
+    if (tsz > 39) tsz = 39;
+    int inputsize = 64 - (int)tsz, stride = g - 3;
+    int levels = (inputsize - g + stride - 1) / stride, level = 4 - levels;
+    uint64_t base = (hi ? cpu->ttbr1_el1 : cpu->ttbr0_el1) & 0x0000ffffffffffffull & ~1ull;
+    fprintf(stderr, "  walk %llx: ttbr%d %llx tsz %u gran %d levels %d\n", (unsigned long long)va, hi,
+            (unsigned long long)base, (unsigned)tsz, g, levels);
+    for (; level <= 3; level++) {
+        int shift = g + stride * (3 - level);
+        int idx_bits = level == 4 - levels ? inputsize - shift : stride;
+        uint64_t idx = (va >> shift) & ((1ull << idx_bits) - 1), desc = 0;
+        if (hv_phys_read(cpu->m, base + idx * 8, &desc, 8) != 0) {
+            fprintf(stderr, "    L%d[%u] @%llx = no ram there\n", level, (unsigned)idx,
+                    (unsigned long long)(base + idx * 8));
+            return;
+        }
+        fprintf(stderr, "    L%d[%u] @%llx = %016llx%s%s\n", level, (unsigned)idx,
+                (unsigned long long)(base + idx * 8), (unsigned long long)desc,
+                (desc & 1) ? "" : "  <- invalid", (desc & 2) ? " table" : "");
+        if (!(desc & 1) || !(desc & 2)) return;
+        base = desc & 0x0000fffffffff000ull;
+    }
+}
+
 void hv_raise_abort(HvCpu *cpu, int insn, uint64_t va, uint32_t fsc, int wnr, int s1ptw, uint64_t pc) {
+    static int walk_reported;
+    /* The first few translation/permission faults of a boot, with the tables the
+       guest is looking at. Only eight, and not the ones that fault on a table
+       walk itself (s1ptw), so a boot that faults once per second stays readable. */
+    if (!s1ptw && cpu->m->log && walk_reported < 8 &&
+        ((fsc & 0x3c) == 0x04 || (fsc & 0x3c) == 0x0c)) {
+        walk_reported++;
+        fprintf(stderr, "abort %s va %llx fsc %#x pc %llx el%u\n", insn ? "fetch" : (wnr ? "write" : "read"),
+                (unsigned long long)va, (unsigned)fsc, (unsigned long long)pc, cpu->el);
+        walk_note(cpu, va);
+        if (pc != va) walk_note(cpu, pc);
+    }
     uint32_t ec = insn ? (cpu->el ? HV_EC_IABT_SAME : HV_EC_IABT_LOWER)
                        : (cpu->el ? HV_EC_DABT_SAME : HV_EC_DABT_LOWER);
     uint32_t iss = fsc | (uint32_t)(wnr && !insn) << 6 | (uint32_t)s1ptw << 7;
