@@ -12,6 +12,8 @@ struct WinSettingsView: View {
 
     @State private var importingPE = false
     @State private var importingPayload = false
+    @State private var importingDisk = false
+    @State private var confirmReplaceDisk = false
     @State private var importError: String?
 
     private let ramChoices = [4096, 6144, 8192, 12288]
@@ -80,10 +82,21 @@ struct WinSettingsView: View {
                 }
                 .disabled(engine.running)
 
-                Section("虚拟硬盘") {
+                Section {
                     LabeledContent("容量", value: "\(machine.diskGB) GB")
                     LabeledContent("占用", value: ByteCountFormatter.string(fromByteCount: machine.diskBytes, countStyle: .file))
                     LabeledContent("状态", value: machine.diskIsBlank ? "空白" : "已有分区")
+                    /* A disk made somewhere else -- UTM with an x86 PE inside it,
+                       qemu-img, dd -- has to be able to become this machine's
+                       disk without going through the installer. */
+                    Button("手动装载磁盘镜像…") {
+                        if machine.diskExists { confirmReplaceDisk = true } else { importingDisk = true }
+                    }
+                    .disabled(engine.running)
+                } header: {
+                    Text("虚拟硬盘")
+                } footer: {
+                    Text("只认 raw：一个扁平镜像，按 512 字节扇区直接读写，没有 qcow2/vhdx 解析。qcow2 请先在 UTM 里建成 raw，或用 qemu-img convert -f qcow2 -O raw 转一道。装载＝把选中的文件拷贝成这台机器的 disk.img，原来的会被覆盖。")
                 }
 
                 Section {
@@ -130,6 +143,15 @@ struct WinSettingsView: View {
             }
             .fileImporter(isPresented: $importingPayload, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
                 importMedia(result, to: machine.payloadISOPath)
+            }
+            .fileImporter(isPresented: $importingDisk, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
+                importMedia(result, to: machine.diskPath)
+            }
+            .confirmationDialog("替换现有硬盘？", isPresented: $confirmReplaceDisk, titleVisibility: .visible) {
+                Button("替换 disk.img", role: .destructive) { importingDisk = true }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("这块盘现在是 \(ByteCountFormatter.string(fromByteCount: machine.diskBytes, countStyle: .file))，导入后原内容找不回来。")
             }
             .alert("导入失败", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
                 Button("好") { importError = nil }
