@@ -54,6 +54,75 @@ const char *hv_winvm_reason_name(int r) {
     }
 }
 
+/* Why the last block returned to the dispatcher, for the sampler below. */
+static const char *exit_reason_name(int r) {
+    switch (r) {
+    case HV_EXIT_NONE: return "none";
+    case HV_EXIT_BRANCH: return "branch";
+    case HV_EXIT_SYSREG: return "sysreg";
+    case HV_EXIT_EXCEPTION: return "exception";
+    case HV_EXIT_WFI: return "wfi";
+    case HV_EXIT_UNDEF: return "undef";
+    case HV_EXIT_UNSUPPORTED: return "unsupported";
+    case HV_EXIT_HALT: return "halt";
+    case HV_EXIT_FLUSH: return "flush";
+    case HV_EXIT_FAULT_LOOP: return "faultloop";
+    default: return "?";
+    }
+}
+
+/* ---- progress sampler: what every CPU is doing, once a second -------------
+   A guest that hangs without touching a device leaves no trace at all: no
+   CDBs, no key reports, no timer deliveries, nothing in any other log. The
+   only way to tell "the guest is stuck at address X" from "we have no data"
+   is to write down its PC, its block counter and the registers a spinlock
+   would wait on, while it is busy not doing anything. `+n` after ic= is the
+   blocks that CPU entered during the last second: 0 means it is not running,
+   not even through the dispatcher. */
+static double sample_t0;
+static uint64_t sample_icount[HV_MAX_CPUS];
+static uint64_t sample_blocks, sample_chained;
+static int sample_stalled;
+
+static double sample_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void sample_cpu_pcs(void) {
+    double now = sample_now();
+    if (sample_t0 == 0.0) sample_t0 = now;
+    unsigned long long d = (unsigned long long)((m.stats.blocks - sample_blocks) +
+                                               (m.stats.chained - sample_chained));
+    int stalled = d == 0;
+    if (stalled && !sample_stalled)
+        fprintf(stderr, "winvm: [pc] %.1fs *** no block entered on any CPU in 1 s: the guest is not executing ***\n",
+                now - sample_t0);
+    if (!stalled && sample_stalled)
+        fprintf(stderr, "winvm: [pc] %.1fs *** executing again ***\n", now - sample_t0);
+    sample_stalled = stalled;
+    for (int i = 0; i < ncpus; i++) {
+        HvCpu *c = &cpus[i];
+        unsigned long long di = (unsigned long long)(c->icount - sample_icount[i]);
+        sample_icount[i] = c->icount;
+        fprintf(stderr, "winvm: [pc] %.1fs c%d pc=%llx el=%u ic=%llu(+%llu) last=%s/%u halt=%d"
+                        " daif=%llx x0=%llx x1=%llx sp=%llx\n",
+                now - sample_t0, i, (unsigned long long)c->pc, c->el, (unsigned long long)c->icount, di,
+                exit_reason_name((int)c->exit_reason), (unsigned)c->exit_reason, (int)c->halted,
+                (unsigned long long)c->daif, (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+                (unsigned long long)c->sp);
+    }
+    if ((m.stats.blocks | 0x3ffu) == m.stats.blocks || m.stats.blocks < 1024)
+        fprintf(stderr, "winvm: [stats] %.1fs blocks=%llu chained=%llu tr=%llu flush_full=%llu"
+                        " protects=%llu fr_fail=%llu\n",
+                now - sample_t0, (unsigned long long)m.stats.blocks, (unsigned long long)m.stats.chained,
+                (unsigned long long)m.stats.translations, (unsigned long long)m.stats.flush_full,
+                (unsigned long long)m.stats.code_protects, (unsigned long long)m.stats.fr_fail[0]);
+    sample_blocks = m.stats.blocks;
+    sample_chained = m.stats.chained;
+}
+
 static void board_poll(void) {
     if (net_on) hv_net_poll();
 }
@@ -244,11 +313,20 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
 
 static void *kicker_thread(void *unused) {
     (void)unused;
+    unsigned tick = 0;
     while (!atomic_load_explicit(&stop_requested, memory_order_relaxed)) {
 #if TARGET_OS_IPHONE
         usleep(2500);
+        if (++tick >= 400) { /* 2.5 ms x 400 = one second */
+            tick = 0;
+            sample_cpu_pcs();
+        }
 #else
         usleep(1000);
+        if (++tick >= 1000) { /* 1 ms x 1000 = one second */
+            tick = 0;
+            sample_cpu_pcs();
+        }
 #endif
         hv_machine_kick_all(&m);
     }
@@ -333,6 +411,11 @@ int hv_winvm_run_cpu0(void) {
             spawn_secondaries();
             continue;
         }
+        /* cpu 0 is the only one that never reported where it stopped: say it. */
+        if (!atomic_load(&stop_requested) && !cpus[0].halted)
+            fprintf(stderr, "winvm: cpu 0 stopped (%s) at pc=%llx el=%u last=%s/%u\n",
+                    hv_winvm_reason_name(r), (unsigned long long)cpus[0].pc, cpus[0].el,
+                    exit_reason_name((int)cpus[0].exit_reason), (unsigned)cpus[0].exit_reason);
         return r;
     }
 }
