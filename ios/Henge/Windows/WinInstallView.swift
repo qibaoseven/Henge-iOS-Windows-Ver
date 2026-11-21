@@ -9,6 +9,8 @@ struct WinInstallView: View {
     @State private var showingSettings = false
 
     private var stage: Int { min(machine.stage, WinStage.titles.count - 1) }
+    /// Skip mode: no PE, no installer, no five stages -- just boot the disk.
+    private var direct: Bool { machine.bootMode == 1 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,7 +41,7 @@ struct WinInstallView: View {
 
     private var idleOverlay: some View {
         VStack(spacing: 10) {
-            Image(systemName: machine.stage >= 4 ? "windows" : "opticaldiscdrive")
+            Image(systemName: machine.stage >= 4 || direct ? "windows" : "opticaldiscdrive")
                 .font(.system(size: 34, weight: .light))
                 .foregroundStyle(.white.opacity(0.5))
             if let error = engine.errorText {
@@ -61,7 +63,7 @@ struct WinInstallView: View {
             Button {
                 if engine.running { engine.stop() } else { engine.start(machine) }
             } label: {
-                Label(engine.running ? "关机" : (machine.stage >= 4 ? "启动" : "开始安装"),
+                Label(engine.running ? "关机" : (direct || machine.stage >= 4 ? "启动" : "开始安装"),
                       systemImage: engine.running ? "stop.fill" : "play.fill")
                     .frame(maxWidth: .infinity)
             }
@@ -86,7 +88,7 @@ struct WinInstallView: View {
             .controlSize(.large)
             .disabled(!engine.running)
 
-            if stage >= 1 && !engine.running {
+            if stage >= 1 && !engine.running && !direct {
                 Button {
                     machine.stage = min(machine.stage + 1, 4)
                     WinLibrary.shared.update(machine)
@@ -104,10 +106,10 @@ struct WinInstallView: View {
     /// The line the whole page exists for: one sentence, never scrolled away.
     private var hintBar: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("\(stage + 1)/5")
+            Text(direct ? "直接启动" : "\(stage + 1)/5")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-            Text(WinStage.hint(stage))
+            Text(direct ? "跳过安装：直接用手动装载的那块盘启动，盘里要有能自举的 EFI 分区。" : WinStage.hint(stage))
                 .font(.caption)
                 .lineLimit(2)
                 .foregroundStyle(.primary)
