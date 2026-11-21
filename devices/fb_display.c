@@ -116,6 +116,11 @@ int hv_fb_display_take_damage(HvFbDisplay *fb, uint32_t *x, uint32_t *y, uint32_
 void hv_fb_display_set_hint(HvFbDisplay *fb, uint32_t w, uint32_t h) {
     if (!fb || w < 64 || h < 64 || w > 8192 || h > 8192) return;
     pthread_mutex_lock(&fb->mu);
+    /* A mode change is the firmware saying "the guest asked for another
+       resolution": one line here is the difference between "the guest never
+       touched the display" and "it did, and then hung". */
+    if (fb->hint_w != w || fb->hint_h != h)
+        fprintf(stderr, "winvm: [fb] mode %ux%u (was %ux%u)\n", w, h, fb->hint_w, fb->hint_h);
     fb->hint_w = w;
     fb->hint_h = h;
     pthread_mutex_unlock(&fb->mu);
