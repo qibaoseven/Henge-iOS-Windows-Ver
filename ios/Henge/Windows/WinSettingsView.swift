@@ -86,6 +86,10 @@ struct WinSettingsView: View {
                     LabeledContent("容量", value: "\(machine.diskGB) GB")
                     LabeledContent("占用", value: ByteCountFormatter.string(fromByteCount: machine.diskBytes, countStyle: .file))
                     LabeledContent("状态", value: machine.diskIsBlank ? "空白" : "已有分区")
+                    Picker("启动方式", selection: $machine.bootMode) {
+                        Text("正常安装").tag(0)
+                        Text("跳过安装（直接启动）").tag(1)
+                    }
                     /* A disk made somewhere else -- UTM with an x86 PE inside it,
                        qemu-img, dd -- has to be able to become this machine's
                        disk without going through the installer. */
@@ -109,7 +113,7 @@ struct WinSettingsView: View {
                 } header: {
                     Text("这两个文件由你提供")
                 } footer: {
-                    Text("PE 必须是 ARM64 的，x64 的 PE 在这台机器上起不来。数据光盘就是装着 install.wim 或 install.esd 的那张 ISO。")
+                    Text("PE 必须是 ARM64 的，x64 的 PE 在这台机器上起不来。数据光盘就是装着 install.wim 或 install.esd 的那张 ISO。选“跳过安装”时这两张盘都不会挂。")
                 }
 
                 Section("内置") {
