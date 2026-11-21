@@ -129,6 +129,69 @@ static const char *stall_note(uint32_t w, uint64_t va, char *b, size_t n) {
     return "";
 }
 
+/* ---- stall memory: files, not log lines -------------------------------------
+   A hang is only worth chasing with the memory it hung in, but forty megabytes
+   of hex in the log would bury every other line. The window around the
+   addresses the dump prints is written to files instead; the log keeps the
+   ranges, the sizes and what could not be read, so the files can be laid
+   against the guest's addresses afterwards. */
+#define STALL_CHUNK (1u << 20)
+#define STALL_SLACK (20ull << 20)    /* this much either side of the outermost pointer */
+#define STALL_STACK_UP (1ull << 20)  /* the stack: 64 KB below sp, 1 MB above */
+#define STALL_STACK_DOWN (64ull << 10)
+#define STALL_MAX (96ull << 20)
+
+static int stall_ram_of(HvCpu *c, uint64_t va, uint64_t *start, uint64_t *end) {
+    for (int i = 0; i < c->m->nram; i++) {
+        HvRam *r = &c->m->ram[i];
+        if (va >= r->pa && va - r->pa < r->size) {
+            *start = r->pa;
+            *end = r->pa + r->size;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Copy guest memory a page at a time: the window may span blocks of more than
+   one size, and a page that cannot be read is written as zeros and counted. */
+static void stall_copy(HvCpu *c, uint64_t va, uint8_t *buf, unsigned long len,
+                       unsigned long *bad) {
+    unsigned long done = 0;
+    while (done < len) {
+        unsigned long n = 4096ul - (unsigned long)((va + done) & 4095ul);
+        HvWalk w;
+        if (n > len - done) n = len - done;
+        hv_mmu_walk(c, va + done, HV_ACC_READ, c->el, &w);
+        if (w.fsc) hv_mmu_walk(c, va + done, HV_ACC_EXEC, c->el, &w); /* code pages are often read-protected */
+        if (w.fsc || hv_phys_read(c->m, w.pa, buf + done, (unsigned)n) != 0) {
+            memset(buf + done, 0, n);
+            if (bad) (*bad)++;
+        }
+        done += n;
+    }
+}
+
+static char *stall_path(const char *what, uint64_t pc, char *out, size_t n) {
+    const char *home = getenv("HOME");
+    snprintf(out, n, "%s/Documents/stall-%s-%llx.bin", home ? home : "/tmp", what, (unsigned long long)pc);
+    return out;
+}
+
+static unsigned long long stall_write(HvCpu *c, FILE *f, uint64_t from, uint64_t len, unsigned long *bad) {
+    uint8_t *buf = malloc(STALL_CHUNK);
+    unsigned long long written = 0;
+    if (!buf) return 0;
+    for (uint64_t off = 0; off < len; off += STALL_CHUNK) {
+        unsigned long n = (unsigned long)(len - off < STALL_CHUNK ? len - off : STALL_CHUNK);
+        stall_copy(c, from + off, buf, n, bad);
+        fwrite(buf, 1, n, f);
+        written += n;
+    }
+    free(buf);
+    return written;
+}
+
 /* The guest has not left one PC for five seconds: say where it is, what the
    code there is, and what the addresses it holds point at. */
 static void stall_dump(HvCpu *c) {
@@ -173,6 +236,73 @@ static void stall_dump(HvCpu *c) {
             fprintf(stderr, "  [x%d] %llx: %llx %llx %llx ... %llx\n", r, (unsigned long long)b,
                     o0 ? (unsigned long long)w0 : 0ull, o8 ? (unsigned long long)w8 : 0ull,
                     o16 ? (unsigned long long)w16 : 0ull, o64 ? (unsigned long long)w64 : 0ull);
+        }
+    }
+    { /* the frame-pointer chain, as far as it goes */
+        uint64_t fp = c->x[29];
+        fprintf(stderr, "  call stack:");
+        for (int i = 0; i < 32 && fp; i++) {
+            uint64_t next = 0, ret = 0;
+            if (!guest_read(c, fp, &next, 8, HV_ACC_READ) || !guest_read(c, fp + 8, &ret, 8, HV_ACC_READ)) break;
+            fprintf(stderr, "%s#%d fp %llx ret %llx", i ? "" : "\n", i, (unsigned long long)fp,
+                    (unsigned long long)ret);
+            if (i % 2) fprintf(stderr, "\n");
+            if (next <= fp || next - fp > (1ull << 24)) break;
+            fp = next;
+        }
+        fprintf(stderr, "\n");
+    }
+    if (c->stall_reported == 1) { /* the memory itself, once: files, not log lines */
+        uint64_t start = 0, end = 0;
+        if (stall_ram_of(c, pc, &start, &end)) {
+            /* pc +/- STALL_SLACK: the code, the image headers above it and the
+               caller pages below it all sit inside that. Clamped to RAM. */
+            uint64_t lo = pc > start + STALL_SLACK ? pc - STALL_SLACK : start;
+            uint64_t hi = pc + STALL_SLACK < end ? pc + STALL_SLACK : end;
+            if (hi > lo + STALL_MAX) hi = lo + STALL_MAX;
+            char path[256];
+            unsigned long bad = 0;
+            FILE *f = fopen(stall_path("mem", pc, path, sizeof path), "wb");
+            unsigned long long n = 0;
+            if (f) {
+                n = stall_write(c, f, lo, hi - lo, &bad);
+                fclose(f);
+            }
+            fprintf(stderr, "  memory %llx..%llx (%llu KB, %lu unreadable pages) -> %s\n",
+                    (unsigned long long)lo, (unsigned long long)hi, n >> 10, bad, f ? path : "(open failed)");
+            /* the stack, read once: written out, and searched for call sites */
+            uint64_t slo = c->sp > STALL_STACK_DOWN ? c->sp - STALL_STACK_DOWN : start;
+            uint64_t shi = c->sp + STALL_STACK_UP < end ? c->sp + STALL_STACK_UP : end;
+            if (slo < start) slo = start;
+            if (shi > slo) {
+                unsigned long n2 = (unsigned long)(shi - slo), bad2 = 0;
+                uint8_t *sb = malloc(n2);
+                if (sb) {
+                    FILE *g;
+                    stall_copy(c, slo, sb, n2, &bad2);
+                    g = fopen(stall_path("stack", pc, path, sizeof path), "wb");
+                    if (g) {
+                        fwrite(sb, 1, n2, g);
+                        fclose(g);
+                    }
+                    fprintf(stderr, "  stack %llx..%llx (%lu KB, %lu unreadable pages) -> %s\n",
+                            (unsigned long long)slo, (unsigned long long)shi, n2 >> 10, bad2,
+                            g ? path : "(open failed)");
+                    /* anything on the stack that points into the code window is a
+                       return address or a saved argument: the call sites, without
+                       trusting the frame pointers. */
+                    int shown = 0;
+                    for (unsigned long o = 0; o + 8 <= n2 && shown < 48; o += 8) {
+                        uint64_t v;
+                        memcpy(&v, sb + o, 8);
+                        if (v >= lo && v < hi && (v & 3) == 0) {
+                            fprintf(stderr, "    stack+%lx: %llx\n", o, (unsigned long long)v);
+                            shown++;
+                        }
+                    }
+                    free(sb);
+                }
+            }
         }
     }
 }
