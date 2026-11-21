@@ -19,6 +19,10 @@ struct WinMachine: Codable, Identifiable, Hashable {
     var panelH: Int = 900
     /// virgl 3D on the virtio-gpu; needs an app built with VIRGL=1.
     var gpu3d: Bool = false
+    /// 0 = the installer flow (PE disc + payload disc, then finish).
+    /// 1 = skip all of it: the disk already came out of UTM/another machine
+    /// fully prepared, so boot it straight away with no discs at all.
+    var bootMode: Int = 0
 
     var folder: URL { WinStore.root.appendingPathComponent(id.uuidString, isDirectory: true) }
     var diskPath: String { folder.appendingPathComponent("disk.img").path }
@@ -50,6 +54,7 @@ struct WinMachine: Codable, Identifiable, Hashable {
         panelW = try c.decodeIfPresent(Int.self, forKey: .panelW) ?? 1440
         panelH = try c.decodeIfPresent(Int.self, forKey: .panelH) ?? 900
         gpu3d = try c.decodeIfPresent(Bool.self, forKey: .gpu3d) ?? false
+        bootMode = try c.decodeIfPresent(Int.self, forKey: .bootMode) ?? 0
     }
 
     init(name: String) { self.name = name }
