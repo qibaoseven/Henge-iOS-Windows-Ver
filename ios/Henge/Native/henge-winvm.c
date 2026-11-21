@@ -88,7 +88,12 @@ int henge_winvm_boot(const char *code_fd, const char *vars_fd, const char *disk0
     c.display_kind = display_kind;
     c.panel_w = panel_w;
     c.panel_h = panel_h;
-    c.log = 0;
+    /* Diagnostics on by default: a guest that hangs without touching a device
+       leaves no other trace, and everything the dispatcher knows about such a
+       state (fault loops with the whole register set, EL1 at a user address,
+       unknown hypervisor calls) is only printed when this is set. HV_LOG=0
+       quiets it again. */
+    c.log = getenv("HV_LOG") ? atoi(getenv("HV_LOG")) : 1;
     c.enable_sound = 0; /* HDA is for the Mac guest; Windows has no driver for it yet */
 
     fprintf(stderr, "henge: booting Windows with %d CPUs, %llu MB RAM, %zu MB JIT, disk=%s cd0=%s cd1=%s cd2=%s\n",
