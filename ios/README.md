@@ -4,8 +4,9 @@ The Henge app on HengeVM's engine. Build: `ios/scripts/package_ipa.sh` (writes
 `~/Desktop/Henge.ipa`; `--trollstore` writes `Henge.tipa`, for TrollStore and
 TrollStore Lite, without the entitlements TrollStore bans). Needs Xcode 27 or later, xcodegen,
 and the prebuilt pieces
-`ios/scripts/fetch_deps.sh` copies from Husk (StikJIT, the pairing library,
-libslirp and glib for iOS). `HENGE_ENTITLEMENTS` picks the app's entitlements file
+`ios/scripts/fetch_deps.sh` copies from Husk (libslirp and glib for iOS; the
+pairing library and StikJIT came with the built-in helper and are no longer
+vendored). `HENGE_ENTITLEMENTS` picks the app's entitlements file
 (default `Henge/Henge.entitlements`). A free personal team uses
 `Henge/Henge.personal.entitlements`: pass it to xcodebuild as a build setting
 (`xcodebuild ... HENGE_ENTITLEMENTS=Henge/Henge.personal.entitlements`, since
@@ -65,7 +66,8 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
   macOS uses and which run as they are, so Henge needs an A14 or M1 or newer.
 
 Code from Husk (GPL-2.0-or-later): `Henge/JIT/*`, `Henge/HengeLog.swift`,
-`Henge/Native/henge-ios-jit.*`, `henge-brk.S`. StikJIT (the framework the
-removed helper linked) is no longer embedded.
+`Henge/Native/henge-ios-jit.*`, `henge-brk.S`. StikJIT and Husk's on-device
+pairing library served the built-in helper only and are no longer vendored,
+linked or embedded.
 MPL-2.0 and idevice MIT (`Henge/Resources/legal/`); `tcg-apple-jit.h` is QEMU's
 (LGPL-2.1). See [docs/licensing.md](../docs/licensing.md).

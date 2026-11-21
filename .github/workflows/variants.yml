@@ -110,10 +110,6 @@ jobs:
         working-directory: Husk
         run: bash scripts/build_ios.sh libffi glib libslirp
 
-      - name: Build Husk's on-device pairing library
-        working-directory: Husk
-        run: bash scripts/build_rppairing_ios.sh
-
       - name: Copy prebuilt deps into HaloWin
         working-directory: Henge
         run: zsh ios/scripts/fetch_deps.sh

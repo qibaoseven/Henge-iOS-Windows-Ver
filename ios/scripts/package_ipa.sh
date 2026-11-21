@@ -19,7 +19,7 @@ TROLLSTORE=false
 NAME="${HENGE_IPA_NAME:-HaloWin}"
 OUT="$HOME/Desktop/$NAME.ipa"
 [ "$TROLLSTORE" = true ] && OUT="$HOME/Desktop/$NAME.tipa"
-[ -d "$IOS/deps/StikJIT.xcframework" ] || "$IOS/scripts/fetch_deps.sh"
+[ -f "$IOS/deps/lib/libslirp.a" ] || "$IOS/scripts/fetch_deps.sh"
 cd "$IOS"
 xcodegen generate >/dev/null
 DD="${HENGE_DD:-$IOS/build/DerivedData}"

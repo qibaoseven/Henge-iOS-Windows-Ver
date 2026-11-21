@@ -21,10 +21,9 @@ the App Store.
 | libimobiledevice-glue, libirecovery, libtatsu, libusbmuxd | LGPL-2.1 | `third_party/` |
 | libzip | BSD | `third_party/libzip` |
 | Mbed TLS | Apache-2.0 or GPL-2.0-or-later | `third_party/mbedtls` |
-| StikJIT (the Bitrise build applies `ci/stikjit-high-address.patch`) | MPL-2.0 | `ios/Henge/Resources/legal/` |
 | idevice | MIT | `ios/Henge/Resources/legal/` |
-| Pairing library's Rust crates | Listed per crate | `ios/Henge/Resources/legal/LICENSES-rppairing-crates.txt` |
 | libslirp, pcre2 | BSD | Prebuilt from Husk |
+
 | glib, libintl | LGPL-2.1-or-later | Prebuilt from Husk |
 
 idevicerestore's `COPYING` file is LGPL-3.0, while its source headers say LGPL-2.1

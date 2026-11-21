@@ -200,7 +200,7 @@ cannot go on the App Store.
 - Changes in this fork: Copyright (C) 2026 qibaoseven, GPL-2.0-or-later —
   [LICENSE-qibaoseven](LICENSE-qibaoseven).
 - Component-by-component provenance — QEMU-derived device code,
-  libimobiledevice, libzip, Mbed TLS, StikJIT and the rest —
+  libimobiledevice, libzip, Mbed TLS and the rest —
   [docs/licensing.md](docs/licensing.md).
 
 Upstream's notices are untouched. Nothing in this fork narrows or replaces them.

@@ -130,10 +130,10 @@ jobs:
           print('firmware: code.fd / vars.fd, 64 MB each, FV header present')
           PY
 
-      # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
-      # StikJIT.xcframework (vendored in Husk's repo, comes with checkout),
-      # libhusk_rppairing.a (scripts/build_rppairing_ios.sh) and the
-      # libslirp/glib/intl/pcre2 static libs (scripts/build_ios.sh).
+      # fetch_deps.sh copies prebuilt static libs out of a BUILT Husk checkout:
+      # libslirp/glib/intl/pcre2 (scripts/build_ios.sh). Nothing else is needed:
+      # the on-device pairing library and StikJIT's framework went with the
+      # built-in JIT helper (StikDebug covers that job now).
       - name: Check out Husk
         uses: actions/checkout@v4
         with:
@@ -173,11 +173,7 @@ jobs:
         working-directory: Husk
         run: bash scripts/build_ios.sh libffi glib libslirp
 
-      - name: Build Husk's on-device pairing library
-        working-directory: Husk
-        run: bash scripts/build_rppairing_ios.sh
-
-      - name: Copy prebuilt deps into Henge
+      - name: Copy prebuilt deps into HaloWin
         working-directory: Henge
         run: zsh ios/scripts/fetch_deps.sh
 
