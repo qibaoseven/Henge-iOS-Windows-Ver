@@ -191,6 +191,13 @@ typedef struct HvCpu {
     uint32_t index;          /* which CPU: m->percpu[index] holds its caches and interrupt lines */
     struct HvPerCpu *pc_state;
     uint64_t icount;         /* blocks entered, for tests and stats */
+    /* Stuck-PC watchdog (log >= 1): a guest that stays at one PC is waiting on
+       something, not booting. stall_since is host time, 0 = not armed yet. */
+    uint64_t stall_pc;
+    uint64_t stall_since;
+    uint64_t stall_blocks;   /* icount when the PC last changed: blocks spent at it */
+    uint32_t stall_n;        /* entries at the same PC since the clock was last read */
+    int stall_reported;      /* dumps made, capped so a hang cannot flood the log */
     _Atomic int halted;      /* HvHaltReason; published across CPU and UI threads */
     int off;                 /* PSCI: powered off (a secondary not started yet, or CPU_OFF) until CPU_ON */
     int parked_off;          /* off, and its thread is waiting (so CPU_ON may reset it) */
