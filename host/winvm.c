@@ -199,32 +199,47 @@ static void stall_dump(HvCpu *c) {
     c->stall_reported++;
     fprintf(stderr, "\nwinvm: *** cpu %u has not left pc %llx el%u for %u s (ic %llu): the guest is waiting, not booting ***\n",
             c->index, (unsigned long long)pc, c->el, (unsigned)c->stall_n, (unsigned long long)c->icount);
-    fprintf(stderr, "  daif %llx sctlr %llx ttbr0 %llx tcr %llx esr %llx far %llx\n",
-            (unsigned long long)c->daif, (unsigned long long)c->sctlr_el1, (unsigned long long)c->ttbr0_el1,
-            (unsigned long long)c->tcr_el1, (unsigned long long)c->esr_el1, (unsigned long long)c->far_el1);
-    fprintf(stderr, "  x0  %llx x1  %llx x2  %llx x3  %llx x4  %llx x5  %llx x6  %llx x7  %llx\n",
-            (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2],
-            (unsigned long long)c->x[3], (unsigned long long)c->x[4], (unsigned long long)c->x[5],
-            (unsigned long long)c->x[6], (unsigned long long)c->x[7]);
-    fprintf(stderr, "  x8  %llx x9  %llx x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx sp  %llx\n",
-            (unsigned long long)c->x[8], (unsigned long long)c->x[9], (unsigned long long)c->x[19],
-            (unsigned long long)c->x[20], (unsigned long long)c->x[21], (unsigned long long)c->x[29],
-            (unsigned long long)c->x[30], (unsigned long long)c->sp);
-    fprintf(stderr, "  elr %llx spsr %llx\n", (unsigned long long)c->elr_el1, (unsigned long long)c->spsr_el1);
+    fprintf(stderr, "  daif %llx sctlr %llx vbar %llx ttbr0 %llx ttbr1 %llx tcr %llx\n",
+            (unsigned long long)c->daif, (unsigned long long)c->sctlr_el1, (unsigned long long)c->vbar_el1,
+            (unsigned long long)c->ttbr0_el1, (unsigned long long)c->ttbr1_el1, (unsigned long long)c->tcr_el1);
+    fprintf(stderr, "  esr %llx (ec %#llx iss %#llx) far %llx elr %llx spsr %llx sp %llx\n",
+            (unsigned long long)c->esr_el1, (unsigned long long)(c->esr_el1 >> 26),
+            (unsigned long long)(c->esr_el1 & 0x1ffffff), (unsigned long long)c->far_el1,
+            (unsigned long long)c->elr_el1, (unsigned long long)c->spsr_el1, (unsigned long long)c->sp);
+    for (int r = 0; r < 30; r += 4)
+        fprintf(stderr, "  x%d %llx x%d %llx x%d %llx x%d %llx\n", r, (unsigned long long)c->x[r],
+                r + 1, (unsigned long long)c->x[r + 1], r + 2, (unsigned long long)c->x[r + 2],
+                r + 3, (unsigned long long)c->x[r + 3]);
+    fprintf(stderr, "  x29 %llx x30 %llx\n", (unsigned long long)c->x[29], (unsigned long long)c->x[30]);
     {
-        char note[48];
-        uint64_t base = pc & ~0xfull;
-        for (int i = 0; i < 16; i++) {
-            uint64_t va = base + 4 * i;
-            uint32_t w = 0;
-            int ok = guest_read(c, va, &w, 4, HV_ACC_EXEC);
-            const char *sep = i % 4 == 3 ? "\n" : "  ";
-            if (i % 4 == 0) fprintf(stderr, "  ");
-            note[0] = 0;
-            if (ok) fprintf(stderr, "%llx: %08x %-14s%s", (unsigned long long)va, w,
-                           stall_note(w, va, note, sizeof note), sep);
-            else fprintf(stderr, "%llx: (unreadable)%s", (unsigned long long)va, sep);
+        uint64_t bases[2] = {pc, c->elr_el1};
+        for (int b = 0; b < 2; b++) {
+            char note[48];
+            uint64_t base = bases[b] & ~0xfull;
+            if (b && (bases[b] < pc - 0x2000 || bases[b] > pc + 0x2000)) {
+                fprintf(stderr, "  -- around elr --\n");
+            } else if (b) {
+                continue;
+            }
+            for (int i = 0; i < 16; i++) {
+                uint64_t va = base + 4 * i;
+                uint32_t w = 0;
+                int ok = guest_read(c, va, &w, 4, HV_ACC_EXEC);
+                const char *sep = i % 4 == 3 ? "\n" : "  ";
+                if (i % 4 == 0) fprintf(stderr, "  ");
+                note[0] = 0;
+                if (ok) fprintf(stderr, "%llx: %08x %-14s%s", (unsigned long long)va, w,
+                               stall_note(w, va, note, sizeof note), sep);
+                else fprintf(stderr, "%llx: (unreadable)%s", (unsigned long long)va, sep);
+            }
         }
+    }
+    { /* the vector table the sync entry came from */
+        uint64_t vb = c->vbar_el1 & ~0x7ffull;
+        uint64_t w = 0;
+        if (vb && guest_read(c, vb + 0x200, &w, 8, HV_ACC_EXEC))
+            fprintf(stderr, "  vector %llx+0x200 = %llx %08x\n", (unsigned long long)vb,
+                    (unsigned long long)w, (unsigned)w);
     }
     { /* what it is polling: the words the registers point at */
         for (int r = 0; r < 8; r++) {
@@ -254,11 +269,20 @@ static void stall_dump(HvCpu *c) {
     }
     if (c->stall_reported == 1) { /* the memory itself, once: files, not log lines */
         uint64_t start = 0, end = 0;
-        if (stall_ram_of(c, pc, &start, &end)) {
+        int in_ram = stall_ram_of(c, pc, &start, &end);
+        {
             /* pc +/- STALL_SLACK: the code, the image headers above it and the
-               caller pages below it all sit inside that. Clamped to RAM. */
-            uint64_t lo = pc > start + STALL_SLACK ? pc - STALL_SLACK : start;
-            uint64_t hi = pc + STALL_SLACK < end ? pc + STALL_SLACK : end;
+               caller pages below it all sit inside that. A kernel PC is a
+               virtual address outside RAM's range entirely, so the window is
+               virtual there and pages that are not mapped come out as zeros. */
+            uint64_t lo, hi;
+            if (in_ram) {
+                lo = pc > start + STALL_SLACK ? pc - STALL_SLACK : start;
+                hi = pc + STALL_SLACK < end ? pc + STALL_SLACK : end;
+            } else {
+                lo = pc > STALL_SLACK ? pc - STALL_SLACK : 0;
+                hi = pc + STALL_SLACK;
+            }
             if (hi > lo + STALL_MAX) hi = lo + STALL_MAX;
             char path[256];
             unsigned long bad = 0;
@@ -271,9 +295,15 @@ static void stall_dump(HvCpu *c) {
             fprintf(stderr, "  memory %llx..%llx (%llu KB, %lu unreadable pages) -> %s\n",
                     (unsigned long long)lo, (unsigned long long)hi, n >> 10, bad, f ? path : "(open failed)");
             /* the stack, read once: written out, and searched for call sites */
-            uint64_t slo = c->sp > STALL_STACK_DOWN ? c->sp - STALL_STACK_DOWN : start;
-            uint64_t shi = c->sp + STALL_STACK_UP < end ? c->sp + STALL_STACK_UP : end;
-            if (slo < start) slo = start;
+            uint64_t slo, shi;
+            if (in_ram) {
+                slo = c->sp > STALL_STACK_DOWN ? c->sp - STALL_STACK_DOWN : start;
+                shi = c->sp + STALL_STACK_UP < end ? c->sp + STALL_STACK_UP : end;
+                if (slo < start) slo = start;
+            } else {
+                slo = c->sp > STALL_STACK_DOWN ? c->sp - STALL_STACK_DOWN : 0;
+                shi = c->sp + STALL_STACK_UP;
+            }
             if (shi > slo) {
                 unsigned long n2 = (unsigned long)(shi - slo), bad2 = 0;
                 uint8_t *sb = malloc(n2);
